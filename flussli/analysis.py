@@ -614,11 +614,11 @@ def analyse_sample(folder: str | Path) -> None:
 
 
 def is_sample_folder(folderpath: str | Path) -> bool:
-    """Determine whether a folder is a sample folder. A sample folder contains at least 1 GCPL file."""
+    """Determine whether a folder is a sample folder. A sample folder contains at least 1 mpr file."""
     folderpath = Path(folderpath)
     if not folderpath.is_dir():
         return False
-    return bool(list(folderpath.glob("*_GCPL_*.mpr")))
+    return bool(list(folderpath.glob("*.mpr")))
 
 
 def find_all_sample_folders(folder: str | Path) -> list[Path]:
