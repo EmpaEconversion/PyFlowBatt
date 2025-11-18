@@ -1,6 +1,6 @@
 """Version information for Flussli."""
 
-__version__ = "0.0.0"
+__version__ = "0.1.0"
 __title__ = "Flussli"
 __copyright__ = "2025, Empa"
 __description__ = """
