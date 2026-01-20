@@ -553,16 +553,18 @@ def analyse_sample(folder: str | Path) -> None:
                     rows.append({"file": f.stem, "tag": tag, "name": name, **values})
             except Exception as e:
                 logger.warning("- Failed to fit %s: %s", f.stem, str(e))
-        eis_df = pd.DataFrame(rows)
-
-        eis_df = eis_df.pivot(index=["file", "tag"], columns=["name"]).reset_index()
-        eis_df.columns = [f"{name}_{field}" if name else field for field, name in eis_df.columns]
-        order = [
-            f"{elem}_{x}"
-            for elem in ["R0", "R1", "CPE1_0", "CPE1_1", "R2", "CPE2_0", "CPE2_1"]
-            for x in ["value", "err", "unit"]
-        ]
-        eis_df = eis_df[["file", "tag", *order]]
+        if rows:
+            eis_df = pd.DataFrame(rows)
+            eis_df = eis_df.pivot(index=["file", "tag"], columns=["name"]).reset_index()
+            eis_df.columns = [
+                f"{name}_{field}" if name else field for field, name in eis_df.columns
+            ]
+            order = [
+                f"{elem}_{x}"
+                for elem in ["R0", "R1", "CPE1_0", "CPE1_1", "R2", "CPE2_0", "CPE2_1"]
+                for x in ["value", "err", "unit"]
+            ]
+            eis_df = eis_df[["file", "tag", *order]]
 
     logger.info("💪 Making sample summary")
 
