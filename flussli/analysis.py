@@ -2,7 +2,6 @@
 
 import logging
 import re
-import warnings
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -11,6 +10,12 @@ import pandas as pd
 import yadg
 
 logger = logging.getLogger(__name__)
+
+
+def mpr_to_df(file: str | Path) -> pd.DataFrame:
+    """Convert .mpr to pandas dataframe."""
+    # with warnings.catch_warnings(record=True) as _w:
+    return yadg.extractors.extract("eclab.mpr", file).to_dataset().to_dataframe().reset_index()
 
 
 def analyse_gcpls(filepaths: str | Path | list[str | Path]) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -22,10 +27,7 @@ def analyse_gcpls(filepaths: str | Path | list[str | Path]) -> tuple[pd.DataFram
     total_cycles = 0
 
     # Read all the files
-    for file in filepaths:
-        with warnings.catch_warnings(record=True) as _w:
-            data = yadg.extractors.extract("eclab.mpr", file)
-            dfs.append(data.to_dataset().to_dataframe())
+    dfs = [mpr_to_df(file) for file in filepaths]
 
     # Reorder based on index
     start_times = [df.index[0] for df in dfs]
@@ -154,11 +156,7 @@ def cycles_to_ratetest(cycle_df: pd.DataFrame) -> pd.DataFrame:
 def read_lsv(filepath: Path | str) -> pd.DataFrame:
     """Read in LSV file with some sanity checks."""
     # Read file to df
-    filepath = Path(filepath)
-    with warnings.catch_warnings(record=True) as _w:
-        data = yadg.extractors.extract("eclab.mpr", filepath)
-    df = data.to_dataset().to_dataframe()
-
+    df = mpr_to_df(filepath)
     # Sanity checks
     if len(df) < 10:
         msg = f"File '{filepath}' has too few data points ({len(df)})."
@@ -222,15 +220,7 @@ def get_cva_capacitance(
     v_range: float = 0.02,
 ) -> tuple[pd.DataFrame, pd.DataFrame, float]:
     """Analyse cyclic voltammetry data, find capacitance from scan-rate vs current difference."""
-    # Read file to df
-    filepath = Path(filepath)
-    with warnings.catch_warnings(record=True) as _w:
-        df = (
-            yadg.extractors.extract(filetype="eclab.mpr", path=filepath)
-            .to_dataset()
-            .to_dataframe()
-            .reset_index()
-        )
+    df = mpr_to_df(filepath)
 
     results = []
     cycle = 1
@@ -372,12 +362,7 @@ def get_sampleid_from_folderpath(folderpath: str | Path) -> str:
 
 def get_average_ocv(mpr_file: str | Path) -> tuple[float, float]:
     """Get the average OCV from an MPR OCV file. Returns mean and std."""
-    df = (
-        yadg.extractors.extract(filetype="eclab.mpr", path=mpr_file)
-        .to_dataset()
-        .to_dataframe()
-        .reset_index()
-    )
+    df = mpr_to_df(mpr_file)
     voltage_col = next((c for c in ["Ewe", "<Ewe>"] if c in df), None)
     if voltage_col:
         return float(df[voltage_col].mean()), float(df[voltage_col].std())
