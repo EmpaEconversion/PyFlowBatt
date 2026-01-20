@@ -554,7 +554,6 @@ def analyse_sample(folder: str | Path) -> None:
             except Exception as e:
                 logger.warning("- Failed to fit %s: %s", f.stem, str(e))
         eis_df = pd.DataFrame(rows)
-        eis_df.to_parquet("thing.parquet")
 
         eis_df = eis_df.pivot(index=["file", "tag"], columns=["name"]).reset_index()
         eis_df.columns = [f"{name}_{field}" if name else field for field, name in eis_df.columns]
