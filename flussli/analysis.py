@@ -290,7 +290,7 @@ def fit_eis(
     R2 = 3 * (Rmax - R0) / 4
 
     circuit = CustomCircuit("R0-p(R1,CPE1)-p(R2,CPE2)", initial_guess=[R0, R1, 1, 1, R2, 1, 1])
-    circuit.fit(f, Z, weight_by_modulus=True)
+    circuit.fit(f, Z, weight_by_modulus=True, maxfev=2.5e4)
     Z_fit = circuit.predict(f)
     vals = circuit.parameters_
     confs = circuit.conf_
