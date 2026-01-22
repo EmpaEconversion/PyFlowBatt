@@ -2,15 +2,21 @@
 
 import logging
 import re
-import warnings
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import yadg
+from impedance.models.circuits import CustomCircuit
 
 logger = logging.getLogger(__name__)
+
+
+def mpr_to_df(file: str | Path) -> pd.DataFrame:
+    """Convert .mpr to pandas dataframe."""
+    # with warnings.catch_warnings(record=True) as _w:
+    return yadg.extractors.extract("eclab.mpr", file).to_dataset().to_dataframe().reset_index()
 
 
 def analyse_gcpls(filepaths: str | Path | list[str | Path]) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -22,10 +28,7 @@ def analyse_gcpls(filepaths: str | Path | list[str | Path]) -> tuple[pd.DataFram
     total_cycles = 0
 
     # Read all the files
-    for file in filepaths:
-        with warnings.catch_warnings(record=True) as _w:
-            data = yadg.extractors.extract("eclab.mpr", file)
-            dfs.append(data.to_dataset().to_dataframe())
+    dfs = [mpr_to_df(file) for file in filepaths]
 
     # Reorder based on index
     start_times = [df.index[0] for df in dfs]
@@ -154,11 +157,7 @@ def cycles_to_ratetest(cycle_df: pd.DataFrame) -> pd.DataFrame:
 def read_lsv(filepath: Path | str) -> pd.DataFrame:
     """Read in LSV file with some sanity checks."""
     # Read file to df
-    filepath = Path(filepath)
-    with warnings.catch_warnings(record=True) as _w:
-        data = yadg.extractors.extract("eclab.mpr", filepath)
-    df = data.to_dataset().to_dataframe()
-
+    df = mpr_to_df(filepath)
     # Sanity checks
     if len(df) < 10:
         msg = f"File '{filepath}' has too few data points ({len(df)})."
@@ -222,15 +221,7 @@ def get_cva_capacitance(
     v_range: float = 0.02,
 ) -> tuple[pd.DataFrame, pd.DataFrame, float]:
     """Analyse cyclic voltammetry data, find capacitance from scan-rate vs current difference."""
-    # Read file to df
-    filepath = Path(filepath)
-    with warnings.catch_warnings(record=True) as _w:
-        df = (
-            yadg.extractors.extract(filetype="eclab.mpr", path=filepath)
-            .to_dataset()
-            .to_dataframe()
-            .reset_index()
-        )
+    df = mpr_to_df(filepath)
 
     results = []
     cycle = 1
@@ -284,6 +275,50 @@ def get_cva_capacitance(
     full_mask = (df["Ns changes"].cumsum() > 0) & full_mask
 
     return df[full_mask], cva_df, capacitance_mF
+
+
+def fit_eis(
+    df: pd.DataFrame,
+) -> tuple[dict[str, dict], np.ndarray]:
+    """Fit EIS to R-(R,CPE)-(R,CPE) model."""
+    f = df["freq"]
+    Z = df["Re(Z)"] - 1j * df["-Im(Z)"]
+
+    R0 = df["Re(Z)"].min()
+    Rmax = df["Re(Z)"].max()
+    R1 = (Rmax - R0) / 4
+    R2 = 3 * (Rmax - R0) / 4
+
+    circuit = CustomCircuit(
+        "L0-R0-p(R1,CPE1)-p(R2,CPE2)",
+        initial_guess=[1e-8, R0, R1, 1, 1, R2, 1, 1],
+    )
+    circuit.fit(f, Z, weight_by_modulus=True, maxfev=2.5e4)
+    Z_fit = circuit.predict(f)
+    vals = circuit.parameters_
+    confs = circuit.conf_
+    names, units = circuit.get_param_names()
+    params = {
+        name: {"value": val, "err": err, "unit": unit}
+        for name, val, err, unit in zip(names, vals, confs, units, strict=True)
+    }
+    return params, Z_fit
+
+
+def plot_eis(df: pd.DataFrame, Z_fit: np.ndarray) -> tuple:
+    """Nyquist plot fit result."""
+    Z = df["Re(Z)"] - 1j * df["-Im(Z)"]
+    fig, axs = plt.subplots(nrows=2)
+    for ax in axs:
+        ax.plot(np.real(Z), -np.imag(Z), "o", label="Data")
+        ax.plot(np.real(Z_fit), -np.imag(Z_fit), "-", label="Fit")
+        ax.legend()
+        ax.set_xlabel("Re(Z) (Ohm)")
+        ax.set_ylabel("-Im(Z) (Ohm)")
+    axs[1].set_yscale("log")
+    axs[1].set_xscale("log")
+    fig.tight_layout()
+    return fig, axs
 
 
 def get_capacitance_from_cva(cva_df: pd.DataFrame) -> tuple[float, float]:
@@ -372,12 +407,7 @@ def get_sampleid_from_folderpath(folderpath: str | Path) -> str:
 
 def get_average_ocv(mpr_file: str | Path) -> tuple[float, float]:
     """Get the average OCV from an MPR OCV file. Returns mean and std."""
-    df = (
-        yadg.extractors.extract(filetype="eclab.mpr", path=mpr_file)
-        .to_dataset()
-        .to_dataframe()
-        .reset_index()
-    )
+    df = mpr_to_df(mpr_file)
     voltage_col = next((c for c in ["Ewe", "<Ewe>"] if c in df), None)
     if voltage_col:
         return float(df[voltage_col].mean()), float(df[voltage_col].std())
@@ -396,15 +426,18 @@ def analyse_sample(folder: str | Path) -> None:
     lsv_files = list(folder.glob("*_LSV_*.mpr"))
     cva_files_before = list(folder.glob("*_CVApre*.mpr"))
     cva_files_after = list(folder.glob("*_CVApost*.mpr"))
+    eis_files = list(folder.glob("*_PEIS_*.mpr"))
     logger.debug("Reading GCPL: %s", ", ".join([f.stem for f in gcpl_files]))
     logger.debug("Reading LSV: %s", ", ".join([f.stem for f in lsv_files]))
     logger.debug("Reading CVA before: %s", ", ".join([f.stem for f in cva_files_before]))
     logger.debug("Reading CVA after:  %s", ", ".join([f.stem for f in cva_files_after]))
+    logger.debug("Reading EIS files: %s", ", ".join([f.stem for f in eis_files]))
 
     cycle_df = None
     cva_df = None
     lsv_df = None
     ratetest_df = None
+    eis_df = None
     (folder / "results").mkdir(exist_ok=True)
 
     logger.info("⛓️‍💥 Analysing OCV")
@@ -495,6 +528,47 @@ def analyse_sample(folder: str | Path) -> None:
             plt.close(fig)
             cva_res[p] = capacitance_mF
 
+    logger.info("🌈 Analysing PEIS")
+    eis_res = {}
+    rows = []
+    if len(eis_files) == 0:
+        logger.warning("- ☹️ No EIS files were found, skipping")
+    else:
+        tags = ["pre", "pre-50%SOC", "post-50%SOC", "post"]
+        for tag, eis_file in zip(tags, eis_files, strict=False):
+            f = Path(eis_file)
+            try:
+                df = mpr_to_df(f)
+                params, Z_fit = fit_eis(df)
+                fig, _ax = plot_eis(df, Z_fit)
+                fig.savefig(folder / "results" / f"eis_{f.stem}.png")
+                eis_res[tag] = params
+                new_df = pd.DataFrame()
+                df = df.reset_index()
+                new_df["uts"] = df["uts"]
+                new_df["frequency_Hz"] = df["freq"]
+                new_df["Re(Z)_Ohm"] = df["Re(Z)"]
+                new_df["-Im(Z)_Ohm"] = df["-Im(Z)"]
+                new_df["Re(Z)_fit_Ohm"] = np.real(Z_fit)
+                new_df["-Im(Z)_fit_Ohm"] = np.imag(Z_fit)
+                new_df.to_csv(folder / "results" / f"eis_{tag}_data.csv", index=False)
+                for name, values in params.items():
+                    rows.append({"file": f.stem, "tag": tag, "name": name, **values})
+            except Exception as e:
+                logger.warning("- Failed to fit %s: %s", f.stem, str(e))
+        if rows:
+            eis_df = pd.DataFrame(rows)
+            eis_df = eis_df.pivot(index=["file", "tag"], columns=["name"]).reset_index()
+            eis_df.columns = [
+                f"{name}_{field}" if name else field for field, name in eis_df.columns
+            ]
+            order = [
+                f"{elem}_{x}"
+                for elem in ["L0", "R0", "R1", "CPE1_0", "CPE1_1", "R2", "CPE2_0", "CPE2_1"]
+                for x in ["value", "err", "unit"]
+            ]
+            eis_df = eis_df[["file", "tag", *order]]
+
     logger.info("💪 Making sample summary")
 
     # Create keys
@@ -507,6 +581,8 @@ def analyse_sample(folder: str | Path) -> None:
         "F post (mF)",
         "∆F (mF)",
         "Assembled resistance (Ω)",
+        "EIS R pre (Ω)",
+        "EIS R pre-50%SOC (Ω)",
         "1st CE (%)",
         "1st EE (%)",
         "1st VE (%)",
@@ -535,6 +611,14 @@ def analyse_sample(folder: str | Path) -> None:
     summary["F post (mF)"]["Value"] = cva_res["post"]
     summary["∆F (mF)"]["Value"] = cva_res["post"] - cva_res["pre"]
     summary["Assembled resistance (Ω)"]["Value"] = get_res_from_filename(gcpl_files[0].stem)
+    summary["EIS R pre (Ω)"]["Value"] = eis_res.get("pre", {}).get("R0", {}).get("value")
+    summary["EIS R pre (Ω)"]["Error"] = eis_res.get("pre", {}).get("R0", {}).get("err")
+    summary["EIS R pre-50%SOC (Ω)"]["Value"] = (
+        eis_res.get("pre-50%SOC", {}).get("R0", {}).get("value")
+    )
+    summary["EIS R pre-50%SOC (Ω)"]["Error"] = (
+        eis_res.get("pre-50%SOC", {}).get("R0", {}).get("err")
+    )
 
     if cycle_df is not None:
         mask = cycle_df["Total cycle"] == 1
@@ -608,6 +692,10 @@ def analyse_sample(folder: str | Path) -> None:
     if lsv_df is not None:
         lsv_df.to_excel(writer, sheet_name="LSV", index=False)
         worksheet = writer.sheets["LSV"]
+        worksheet.autofit()
+    if eis_df is not None:
+        eis_df.to_excel(writer, sheet_name="EIS", index=False)
+        worksheet = writer.sheets["EIS"]
         worksheet.autofit()
 
     workbook.close()
