@@ -289,7 +289,10 @@ def fit_eis(
     R1 = (Rmax - R0) / 4
     R2 = 3 * (Rmax - R0) / 4
 
-    circuit = CustomCircuit("R0-p(R1,CPE1)-p(R2,CPE2)", initial_guess=[R0, R1, 1, 1, R2, 1, 1])
+    circuit = CustomCircuit(
+        "L0-R0-p(R1,CPE1)-p(R2,CPE2)",
+        initial_guess=[1e-8, R0, R1, 1, 1, R2, 1, 1],
+    )
     circuit.fit(f, Z, weight_by_modulus=True, maxfev=2.5e4)
     Z_fit = circuit.predict(f)
     vals = circuit.parameters_
@@ -561,7 +564,7 @@ def analyse_sample(folder: str | Path) -> None:
             ]
             order = [
                 f"{elem}_{x}"
-                for elem in ["R0", "R1", "CPE1_0", "CPE1_1", "R2", "CPE2_0", "CPE2_1"]
+                for elem in ["L0", "R0", "R1", "CPE1_0", "CPE1_1", "R2", "CPE2_0", "CPE2_1"]
                 for x in ["value", "err", "unit"]
             ]
             eis_df = eis_df[["file", "tag", *order]]
