@@ -19,6 +19,41 @@ def mpr_to_df(file: str | Path) -> pd.DataFrame:
     return yadg.extractors.extract("eclab.mpr", file).to_dataset().to_dataframe().reset_index()
 
 
+def df_save_bdf(df: pd.DataFrame, filename: str | Path) -> None:
+    """Save as bdf parquet."""
+    multiplier_map = {
+        "-Im(Z)": -1,
+    }
+    col_map = {
+        "uts": "Unix Time / s",
+        "time": "Test Time / s",
+        "Ewe": "Voltage / V",
+        "<I>": "Current / A",
+        "freq": "Frequency / Hz",
+        "Re(Z)": "Real Impedance / ohm",
+        "-Im(Z)": "Imaginary Impedance / ohm",
+        "Re(Z)_fit_Ohm": "Real Impedance Fit / ohm",
+        "Im(Z)_fit_Ohm": "Imaginary Impedance Fit / ohm",
+        "cycle number": "Cycle Count / 1",
+        "Total cycle": "Cycle Count / 1",
+        "Temperature": "Ambient Temperature / degC",
+    }
+    # Don't modify original df
+    save_df = df.copy()
+
+    # Modify cols if needed
+    multiply_cols = [c for c in multiplier_map if c in df.columns]
+    for c in multiply_cols:
+        save_df[c] = save_df[c] * multiplier_map[c]
+
+    # Rename cols to bdf
+    rename_cols = [c for c in col_map if c in df.columns]
+    save_df = save_df[rename_cols].rename(columns={c: col_map[c] for c in rename_cols})
+
+    # Save to a parquet file
+    save_df.to_parquet(filename, index=False)
+
+
 def analyse_gcpls(filepaths: str | Path | list[str | Path]) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Take a list of GCPL files and return a time-series dataframe, and a per-cycle dataframe."""
     if not isinstance(filepaths, list):
@@ -458,7 +493,7 @@ def analyse_sample(folder: str | Path) -> None:
         fig.savefig(folder / "results" / "gcpl.png")
         plt.close()
         ratetest_df = cycles_to_ratetest(cycle_df)
-        df.to_parquet(folder / "results" / "gcpl_data.parquet")
+        df_save_bdf(df, folder / "results" / "gcpl.bdf.parquet")
 
     logger.info("↗️ Analysing LSV")
     lsv_res = {"pre": np.nan, "post": np.nan}
@@ -484,21 +519,21 @@ def analyse_sample(folder: str | Path) -> None:
             fig, _ax = plot_lsv(df, results)
             fig.savefig(folder / "results" / f"lsv_{p}.png")
             plt.close(fig)
-            df.to_parquet(folder / "results" / f"lsv_{p}_data.parquet")
+            df_save_bdf(df, folder / "results" / f"lsv_{p}.bdf.parquet")
             lsv_res[p] = float(results["Area specific resistance (Ω cm²)"])
 
             results = {"Pre or post cycle": p, **results}
             lsv_df = pd.DataFrame([results])
         else:
             df, results_pre = analyse_lsv(lsv_files[0])
-            df.to_parquet(folder / "results" / "lsv_pre_data.parquet")
+            df_save_bdf(df, folder / "results" / "lsv_pre.bdf.parquet")
             fig, _ax = plot_lsv(df, results_pre)
             fig.savefig(folder / "results" / "lsv_pre.png")
             plt.close(fig)
             lsv_res["pre"] = float(results_pre["Area specific resistance (Ω cm²)"])
 
             df, results_post = analyse_lsv(lsv_files[-1])
-            df.to_parquet(folder / "results" / "lsv_post_data.parquet")
+            df_save_bdf(df, folder / "results" / "lsv_post.bdf.parquet")
             fig, _ax = plot_lsv(df, results_post)
             fig.savefig(folder / "results" / "lsv_post.png")
             plt.close(fig)
@@ -522,7 +557,7 @@ def analyse_sample(folder: str | Path) -> None:
             if len(cva_files) > 1:
                 logger.warning("More than one CVA file, only reading %s", cva_files[0].stem)
             df, cva_df, capacitance_mF = get_cva_capacitance(cva_files[0])
-            df.to_parquet(folder / "results" / f"cva_{p}_data.parquet")
+            df_save_bdf(df, folder / "results" / f"cva_{p}.bdf.parquet")
             fig, _ax = plot_cva_capacitance(df, cva_df)
             fig.savefig(folder / "results" / f"cva_{p}.png")
             plt.close(fig)
@@ -541,17 +576,11 @@ def analyse_sample(folder: str | Path) -> None:
                 df = mpr_to_df(f)
                 params, Z_fit = fit_eis(df)
                 fig, _ax = plot_eis(df, Z_fit)
-                fig.savefig(folder / "results" / f"eis_{f.stem}.png")
+                fig.savefig(folder / "results" / f"eis_{tag}.png")
                 eis_res[tag] = params
-                new_df = pd.DataFrame()
-                df = df.reset_index()
-                new_df["uts"] = df["uts"]
-                new_df["frequency_Hz"] = df["freq"]
-                new_df["Re(Z)_Ohm"] = df["Re(Z)"]
-                new_df["-Im(Z)_Ohm"] = df["-Im(Z)"]
-                new_df["Re(Z)_fit_Ohm"] = np.real(Z_fit)
-                new_df["-Im(Z)_fit_Ohm"] = np.imag(Z_fit)
-                new_df.to_csv(folder / "results" / f"eis_{tag}_data.csv", index=False)
+                df["Re(Z)_fit_Ohm"] = np.real(Z_fit)
+                df["Im(Z)_fit_Ohm"] = np.imag(Z_fit)
+                df_save_bdf(df, folder / "results" / f"eis_{tag}.bdf.parquet")
                 for name, values in params.items():
                     rows.append({"file": f.stem, "tag": tag, "name": name, **values})
             except Exception as e:
