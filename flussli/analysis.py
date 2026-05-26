@@ -5,445 +5,16 @@ import re
 from pathlib import Path
 from typing import Literal
 
-import bdf
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import yadg
-from impedance.models.circuits import CustomCircuit
+
+from flussli import cv, eis, gcpl, lsv, ocv
+from flussli.read import read_to_bdf
 
 logger = logging.getLogger(__name__)
 
 SAVE_FORMATS = Literal["parquet", "csv"] | None
-
-
-def read_to_bdf(file: str | Path) -> pd.DataFrame:
-    """Read file into pandas dataframe with BDF columns."""
-    if Path(file).suffix == ".mpr":
-        df = yadg.extractors.extract("eclab.mpr", file).to_dataset().to_dataframe().reset_index()
-        cols = set(df.columns)
-        if not ({"I", "<I>"} & cols):
-            if ({"dq", "dQ"} & cols) and "uts" in cols:
-                # dq is mA h, multiply by 3600 to get mA s
-                # Then multiply by diff(time) / s to get current in mA
-                # mA -> A happens later, in _mpr_df_to_bdf
-                dq_col = next(col for col in ("dq", "dQ") if col in cols)
-                dt = df["uts"].diff().fillna(float("inf"))
-                df["I"] = 3600 * df[dq_col] / dt
-            else:
-                df["I"] = 0  # e.g. OCV
-
-        if "half cycle" in df.columns:  # It is cycling data
-            # Have to do some duct taping
-            # EC-labs 'cycles' and 'Q charge or discharge' are sometimes wrong
-            df["dumb cycle"] = (df["ox or red"].diff() > 0).cumsum()
-            df["cycle number"] = 0
-            cycle = 1
-            for _group, group_df in df.groupby("dumb cycle"):
-                chg_mask = group_df["dq"] > 0
-                dchg_mask = group_df["dq"] < 0
-                if (
-                    sum(group_df["dq"][chg_mask]) > 0
-                    and sum(group_df["dq"][dchg_mask]) < 0
-                    and sum(chg_mask) > 5
-                    and sum(dchg_mask) > 5
-                ):
-                    df.loc[group_df.index, "cycle number"] = cycle
-                    cycle += 1
-
-        if "Ns changes" in df.columns:
-            df["step number"] = 1 + df["Ns changes"].cumsum()
-
-        return _mpr_df_to_bdf(df)
-    return bdf.read(file)
-
-
-def _mpr_df_to_bdf(df: pd.DataFrame) -> pd.DataFrame:
-    """Convert mpr columns to BDF."""
-    col_map = {
-        "uts": "Unix Time / s",
-        "time": "Test Time / s",
-        "Ewe": "Voltage / V",
-        "Ece": "Voltage / V",
-        "<Ewe>": "Voltage / V",
-        "<Ece>": "Voltage / V",
-        "Ecell": "Voltage / V",
-        "I": "Current / A",
-        "<I>": "Current / A",
-        "freq": "Frequency / Hz",
-        "Re(Z)": "Real Impedance / ohm",
-        "-Im(Z)": "Imaginary Impedance / ohm",
-        "Re(Z)_fit_Ohm": "Real Impedance Fit / ohm",
-        "Im(Z)_fit_Ohm": "Imaginary Impedance Fit / ohm",
-        "cycle number": "Cycle Count / 1",
-        "step number": "Step Count / 1",
-        "Temperature": "Ambient Temperature / degC",
-    }
-    multiplier_map = {
-        "Imaginary Impedance / ohm": -1,
-        "Current / A": 1e-3,
-    }
-
-    # Rename cols to bdf
-    rename_cols = [c for c in col_map if c in df.columns]
-    df = df[rename_cols].rename(columns={c: col_map[c] for c in rename_cols})
-
-    # Modify cols if needed
-    multiply_cols = [c for c in multiplier_map if c in df.columns]
-    for c in multiply_cols:
-        df[c] = df[c] * multiplier_map[c]
-
-    return df
-
-
-def analyse_gcpls(filepaths: str | Path | list[str | Path]) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Take a list of GCPL files and return a time-series dataframe, and a per-cycle dataframe."""
-    if not isinstance(filepaths, list):
-        filepaths = [filepaths]
-    dfs = []
-    cycle_dfs = []
-    total_cycles = 0
-
-    # Read all the files
-    dfs = [read_to_bdf(file) for file in filepaths]
-
-    # Reorder based on index
-    start_times = [df["Unix Time / s"].iloc[0] for df in dfs]
-    order = np.argsort(start_times)
-    dfs = [dfs[i] for i in order]
-
-    # Go through each file and extract the data
-    for df in dfs:
-        if "Cycle Count / 1" not in df.columns:
-            logger.warning("Cycle count required in data")
-            continue
-        df["Total Cycle Count / 1"] = df["Cycle Count / 1"] + total_cycles
-        total_cycles = df["Total Cycle Count / 1"].max()
-
-        # Create dataframe with just cycle information
-        cycle_df = df.groupby("Cycle Count / 1").first().index.to_frame()
-        cycle_df["Total Cycle Count / 1"] = df.groupby("Cycle Count / 1").first()[
-            "Total Cycle Count / 1"
-        ]
-
-        # Fill that dataframe with per-cycle information
-        dt = df["Unix Time / s"].diff().fillna(float("0"))
-        df["dq"] = df["Current / A"] * dt / 3.6  # mAh
-        for group, group_df in df.groupby("Cycle Count / 1"):
-            chg_mask = group_df["dq"] > 0
-            dchg_mask = group_df["dq"] < 0
-            if chg_mask.sum() > 0 and dchg_mask.sum() > 0:
-                charge_capacity = group_df["dq"][chg_mask].sum()
-                discharge_capacity = group_df["dq"][dchg_mask].sum()
-                charge_energy = (group_df["dq"] * group_df["Voltage / V"])[chg_mask].sum()
-                discharge_energy = (group_df["dq"] * group_df["Voltage / V"])[dchg_mask].sum()
-                avg_voltage = (group_df["Voltage / V"] * abs(group_df["dq"])).sum() / abs(
-                    group_df["dq"]
-                ).sum()
-                cycle_df.loc[group, "Charge Capacity / mAh"] = charge_capacity
-                cycle_df.loc[group, "Discharge Capacity / mAh"] = -discharge_capacity
-                cycle_df.loc[group, "Charge Energy / mWh"] = charge_energy
-                cycle_df.loc[group, "Discharge Energy / mWh"] = -discharge_energy
-                cycle_df.loc[group, "Charge Average Voltage / V"] = charge_energy / charge_capacity
-                cycle_df.loc[group, "Discharge Average Voltage / V"] = (
-                    discharge_energy / discharge_capacity
-                )
-                cycle_df.loc[group, "Cycle Average Voltage / V"] = avg_voltage
-                cycle_df.loc[group, "Average Current / A"] = group_df["Current / A"].abs().mean()
-                cycle_df.loc[group, "Coulombic Efficiency / %"] = (
-                    -discharge_capacity / charge_capacity
-                ) * 100
-                cycle_df.loc[group, "Energy Efficiency / %"] = (
-                    -discharge_energy / charge_energy
-                ) * 100
-                cycle_df.loc[group, "Voltage Efficiency / %"] = (
-                    (discharge_energy / discharge_capacity)
-                    / (charge_energy / charge_capacity)
-                    * 100
-                )
-            else:
-                cycle_df.loc[group, "Cycle Count / 1"] = 0
-        cycle_df = cycle_df[cycle_df["Cycle Count / 1"] > 0]
-        if cycle_df.empty:
-            continue
-        # Add to a list of dataframes
-        cycle_dfs.append(cycle_df)
-    dfs = [df.drop("dq", axis=1) if "dq" in df.columns else df for df in dfs]
-    df = pd.concat(dfs)
-    cycle_df = pd.concat(cycle_dfs)
-
-    return df, cycle_df
-
-
-def round_sig(s: pd.Series, sig: int = 2) -> pd.Series:
-    """Round to significant figures."""
-    return s.apply(lambda x: round(x, sig - int(np.floor(np.log10(abs(x)))) - 1) if x != 0 else 0)
-
-
-def cycles_to_ratetest(cycle_df: pd.DataFrame) -> pd.DataFrame:
-    """Take a ratetest per-cycle dataframe and aggregate by current."""
-    rounded = round_sig(cycle_df["Average Current / A"])
-    current_groups = (rounded != rounded.shift()).cumsum()
-    ratetest_df = cycle_df.groupby(current_groups).agg(
-        {
-            "Average Current / A": ["mean"],
-            "Total Cycle Count / 1": ["first", "last"],
-            "Discharge Capacity / mAh": ["mean", "std"],
-            "Charge Capacity / mAh": ["mean", "std"],
-            "Discharge Energy / mWh": ["mean", "std"],
-            "Charge Energy / mWh": ["mean", "std"],
-            "Charge Average Voltage / V": ["mean", "std"],
-            "Discharge Average Voltage / V": ["mean", "std"],
-            "Cycle Average Voltage / V": ["mean", "std"],
-            "Coulombic Efficiency / %": ["mean", "std"],
-            "Energy Efficiency / %": ["mean", "std"],
-            "Voltage Efficiency / %": ["mean", "std"],
-        },
-    )
-    # Rename the index to index
-    ratetest_df = ratetest_df.reset_index(drop=True)
-
-    # Create a new column that is 1 if it is the first time a current is seen,
-    # 2 if it is the second time, etc.
-    ratetest_df["Times seen"] = 0
-    times_seen = {}
-    for i, current in enumerate(ratetest_df["Average Current / A"]["mean"]):
-        if current not in times_seen:
-            times_seen[current] = 1
-        else:
-            times_seen[current] += 1
-        ratetest_df.loc[i, "Times seen"] = times_seen[current]
-    # Flatten, rename the multi-index columns
-    ratetest_df.columns = [" ".join(col).strip() for col in ratetest_df.columns.to_numpy()]
-    return ratetest_df.rename(
-        columns={
-            "Average Current / A mean": "Average Current / A",
-            "Total Cycle Count / 1 first": "First cycle",
-            "Total Cycle Count / 1 last": "Last cycle",
-        },
-    )
-
-
-def read_lsv(filepath: Path | str) -> pd.DataFrame:
-    """Read in LSV file with some sanity checks."""
-    # Read file to df
-    df = read_to_bdf(filepath)
-    # Sanity checks
-    if len(df) < 10:
-        msg = f"File '{filepath}' has too few data points ({len(df)})."
-        raise ValueError(msg)
-    if not all(col in df.columns for col in ["Voltage / V", "Current / A"]):
-        msg = f"File '{filepath}' does not contain the required columns."
-        raise ValueError(msg)
-    return df
-
-
-def analyse_lsv(filepath: Path | str) -> tuple[pd.DataFrame, dict[str, float | str]]:
-    """Extract data from LSV, fit line and return resistance."""
-    # Read file to df
-    df = read_lsv(filepath)
-
-    # Fit straight line above cutoff current
-    cutoff_current = (df["Current / A"].max() - df["Current / A"].min()) / 2
-    mask = df["Current / A"] > cutoff_current
-    x = df["Voltage / V"][mask]
-    y = df["Current / A"][mask]
-    slope, intercept = np.polyfit(x, y, 1)
-    resistance_ohm = 1 / slope
-    area_cm2 = 5
-    specific_resistance_ohm_cm2 = resistance_ohm * area_cm2
-    results = {
-        "Fit cutoff current / A": cutoff_current,
-        "Intercept / A": intercept,
-        "Slope / Ω⁻¹": slope,
-        "Resistance / Ω": resistance_ohm,
-        "Area / cm²": area_cm2,
-        "Area specific resistance / Ω cm²": specific_resistance_ohm_cm2,
-        "File name": Path(filepath).name,
-    }
-    return df, results
-
-
-def plot_lsv(df: pd.DataFrame, results: dict[str, float | str]) -> tuple:
-    """Take LSV data df and results dict and plot."""
-    # Plot the data
-    fig, ax = plt.subplots()
-    ax.plot(df["Voltage / V"], df["Current / A"], label="Data")
-    ax.set_xlabel("Voltage / V")
-    ax.set_ylabel("Current / A")
-
-    # Plot the fit
-    mask = df["Current / A"] > results["Fit cutoff current / A"]
-    x = np.linspace(df["Voltage / V"][mask].min(), df["Voltage / V"][mask].max(), 10)
-    y = results["Intercept / A"] + results["Slope / Ω⁻¹"] * x
-    ax.plot(x, y, "k-", label="Fit")
-    ax.legend()
-    fig.tight_layout()
-
-    return fig, ax
-
-
-def get_cva_capacitance(
-    filepath: Path | str,
-    v_min: float = 0.4004,
-    v_max: float = 0.6,
-    v_med: float = 0.5,
-    v_range: float = 0.02,
-) -> tuple[pd.DataFrame, pd.DataFrame, float]:
-    """Analyse cyclic voltammetry data, find capacitance from scan-rate vs current difference."""
-    df = read_to_bdf(filepath)
-
-    results = []
-    cycle = 1
-    df["Scan rate / V s⁻¹"] = 0.0
-    full_mask = np.zeros_like(df["Voltage / V"], dtype=bool)
-    for group, _gdf in df.groupby("Cycle Count / 1"):
-        mask = (
-            (df["Cycle Count / 1"] == group)
-            & (df["Voltage / V"] > v_min)
-            & (df["Voltage / V"] < v_max)
-        )
-        full_mask = full_mask | mask
-        if sum(mask) < 10:
-            continue  # Not enough points
-
-        # Add scan rate to the original df
-        df.loc[mask, "Scan rate / V s⁻¹"] = np.nan_to_num(
-            df["Voltage / V"][mask].diff() / df["Unix Time / s"][mask].diff()
-        )
-        gdf = df[mask]
-
-        # Extract some values
-        upward_scan_current = np.mean(
-            gdf["Current / A"][
-                (gdf["Scan rate / V s⁻¹"] > 0)
-                & (gdf["Voltage / V"] > v_med - v_range)
-                & (gdf["Voltage / V"] < v_med + v_range)
-            ]
-        )
-        downward_scan_current = np.mean(
-            gdf["Current / A"][
-                (gdf["Scan rate / V s⁻¹"] < 0)
-                & (gdf["Voltage / V"] > v_med - v_range)
-                & (gdf["Voltage / V"] < v_med + v_range)
-            ]
-        )
-        current_diff = upward_scan_current - downward_scan_current
-        scan_rate = np.median(abs(gdf["Scan rate / V s⁻¹"]))
-
-        results.append(
-            {
-                "I upsweep / A": upward_scan_current,
-                "I downsweep / A": downward_scan_current,
-                "∆I / A": current_diff,
-                "Scan rate / V s⁻¹": scan_rate,
-                "CV Cycle": cycle,
-            }
-        )
-        cycle = cycle + 1
-
-    cva_df = pd.DataFrame(results)
-    capacitance_F, _intercept_mA = get_capacitance_from_cva(cva_df)
-    capacitance_mF = capacitance_F * 1000
-
-    # Only take data after the first step
-    full_mask = (df["Step Count / 1"] >= 2) & full_mask
-
-    return df[full_mask], cva_df, capacitance_mF
-
-
-def fit_eis(
-    df: pd.DataFrame,
-) -> tuple[dict[str, dict], np.ndarray]:
-    """Fit EIS to R-(R,CPE)-(R,CPE) model."""
-    f = df["Frequency / Hz"]
-    Z = df["Real Impedance / ohm"] + 1j * df["Imaginary Impedance / ohm"]
-
-    R0 = df["Real Impedance / ohm"].min()
-    Rmax = df["Real Impedance / ohm"].max()
-    R1 = (Rmax - R0) / 4
-    R2 = 3 * (Rmax - R0) / 4
-
-    circuit = CustomCircuit(
-        "L0-R0-p(R1,CPE1)-p(R2,CPE2)",
-        initial_guess=[1e-8, R0, R1, 1, 1, R2, 1, 1],
-    )
-    circuit.fit(f, Z, weight_by_modulus=True, maxfev=2.5e4)
-    Z_fit = circuit.predict(f)
-    vals = circuit.parameters_
-    confs = circuit.conf_
-    names, units = circuit.get_param_names()
-    params = {
-        name: {"value": val, "err": err, "unit": unit}
-        for name, val, err, unit in zip(names, vals, confs, units, strict=True)
-    }
-    return params, Z_fit
-
-
-def plot_eis(df: pd.DataFrame, Z_fit: np.ndarray) -> tuple:
-    """Nyquist plot fit result."""
-    Z = df["Real Impedance / ohm"] + 1j * df["Imaginary Impedance / ohm"]
-    fig, axs = plt.subplots(nrows=2)
-    for ax in axs:
-        ax.plot(np.real(Z), -np.imag(Z), "o", label="Data")
-        ax.plot(np.real(Z_fit), -np.imag(Z_fit), "-", label="Fit")
-        ax.legend()
-        ax.set_xlabel("Real Impedance / ohm")
-        ax.set_ylabel("Imaginary Impedance / ohm")
-    axs[1].set_yscale("log")
-    axs[1].set_xscale("log")
-    fig.tight_layout()
-    return fig, axs
-
-
-def get_capacitance_from_cva(cva_df: pd.DataFrame) -> tuple[float, float]:
-    """Fit a straight line to get the capacitance from cyclic voltammetry."""
-    # Round scan rate to 2 sig figs to group
-    power = 10 ** np.floor(np.log10(np.abs(cva_df["Scan rate / V s⁻¹"])))
-    cva_df["Scan rate rounded / V s⁻¹"] = np.round(cva_df["Scan rate / V s⁻¹"] / power, 1) * power
-
-    # Make mask of largest cycle in each scan rate rounded group
-    mask = (
-        cva_df.groupby("Scan rate rounded / V s⁻¹")["CV Cycle"].transform("max")
-        == cva_df["CV Cycle"]
-    )
-
-    # Do a linear fit of the Idiff/2 to get the capacitance
-    # dy/dx is capacitance in mA s / V = mC / V = mF
-    capacitance_mF, intercept_mA = np.polyfit(
-        cva_df[mask]["Scan rate rounded / V s⁻¹"], cva_df[mask]["∆I / A"] / 2, 1
-    )
-
-    return capacitance_mF, intercept_mA
-
-
-def plot_time_series(df: pd.DataFrame) -> tuple:
-    """Plot time series data."""
-    fig, ax = plt.subplots()
-    df = df.reset_index()
-    ax.plot((df["Unix Time / s"] - df["Unix Time / s"].iloc[0]) / 3600, df["Voltage / V"])
-    ax.set_xlabel("Time / h")
-    ax.set_ylabel("Voltage / V")
-    fig.tight_layout()
-    return fig, ax
-
-
-def plot_cva_capacitance(df: pd.DataFrame, cva_df: pd.DataFrame) -> tuple:
-    """Plot cyclic voltammetry data."""
-    fig, ax = plt.subplots(ncols=2)
-    ax[0].plot(df["Voltage / V"], df["Current / A"])
-    ax[0].set_xlabel("Voltage / V")
-    ax[0].set_ylabel("Current / A")
-
-    ax[1].plot(cva_df["Scan rate / V s⁻¹"], cva_df["∆I / A"] / 2, "o", label="Data")
-    ax[1].set_xlabel("Scan rate / V s⁻¹")
-    ax[1].set_ylabel("∆I/2 / A")
-
-    m, c = get_capacitance_from_cva(cva_df)
-    ax[1].plot(cva_df["Scan rate / V s⁻¹"], m * cva_df["Scan rate / V s⁻¹"] + c, "k-", label="Fit")
-    ax[1].legend()
-    fig.tight_layout()
-    return fig, ax
 
 
 def get_res_from_filename(s: str) -> float:
@@ -481,23 +52,14 @@ def get_sampleid_from_folderpath(folderpath: str | Path) -> str:
     return "Unknown sample"
 
 
-def get_average_ocv(file: str | Path) -> tuple[float, float]:
-    """Get the average OCV from an MPR OCV file. Returns mean and std."""
-    df = read_to_bdf(file)
-    if "Voltage / V" in df.columns:
-        return float(df["Voltage / V"].mean()), float(df["Voltage / V"].std())
-    msg = f"Could not find voltage column in {file}."
-    raise ValueError(msg)
-
-
-def df_save_bdf(df: pd.DataFrame, filepath: Path, format: SAVE_FORMATS = "parquet") -> None:
+def df_save_bdf(df: pd.DataFrame, filepath: Path, save_format: SAVE_FORMATS = "parquet") -> None:
     """Save df to file."""
-    if format is None:
+    if save_format is None:
         return
-    if format == "parquet":
+    if save_format == "parquet":
         df.to_parquet(filepath.with_suffix(".bdf.parquet"))
         return
-    if format == "csv":
+    if save_format == "csv":
         df.to_csv(filepath.with_suffix(".csv.parquet"))
         return
     msg = "Format not understood"
@@ -513,17 +75,17 @@ def analyse_sample(folder: str | Path, *, save_format: SAVE_FORMATS = "parquet")
     gcpl_file = max(gcpl_files, key=lambda x: x.stat().st_size) if gcpl_files else None
     ocv_files = list(folder.glob("*_OCV_*.mpr"))
     lsv_files = list(folder.glob("*_LSV_*.mpr"))
-    cva_files_before = list(folder.glob("*_CVApre*.mpr"))
-    cva_files_after = list(folder.glob("*_CVApost*.mpr"))
+    cv_files_before = list(folder.glob("*_CVApre*.mpr")) + list(folder.glob("*_CVpre*.mpr"))
+    cv_files_after = list(folder.glob("*_CVApost*.mpr")) + list(folder.glob("*_CVpost*.mpr"))
     eis_files = list(folder.glob("*_PEIS_*.mpr"))
     logger.debug("Reading GCPL: %s", ", ".join([f.stem for f in gcpl_files]))
     logger.debug("Reading LSV: %s", ", ".join([f.stem for f in lsv_files]))
-    logger.debug("Reading CVA before: %s", ", ".join([f.stem for f in cva_files_before]))
-    logger.debug("Reading CVA after:  %s", ", ".join([f.stem for f in cva_files_after]))
+    logger.debug("Reading CV before: %s", ", ".join([f.stem for f in cv_files_before]))
+    logger.debug("Reading CV after:  %s", ", ".join([f.stem for f in cv_files_after]))
     logger.debug("Reading EIS files: %s", ", ".join([f.stem for f in eis_files]))
 
     cycle_df = None
-    cva_df = None
+    cv_df = None
     lsv_df = None
     ratetest_df = None
     eis_df = None
@@ -532,22 +94,22 @@ def analyse_sample(folder: str | Path, *, save_format: SAVE_FORMATS = "parquet")
     logger.info("⛓️‍💥 Analysing OCV")
     if len(ocv_files) == 0:
         logger.info("- ☹️ No OCV found, skipping")
-        ocv = (np.nan, np.nan)
+        av_ocv = (np.nan, np.nan)
     else:
         if len(ocv_files) > 1:
             logger.warning("- More than one OCV file, only reading %s", ocv_files[0].stem)
-        ocv = get_average_ocv(ocv_files[0])
+        av_ocv = ocv.analyse(ocv_files[0])
 
     logger.info("🔋 Analysing GCPL")
     if gcpl_file is None:
         logger.warning("- ☹️ No GCPL files found, skipping")
     else:
-        df, cycle_df = analyse_gcpls([gcpl_file])
-        fig, _ax = plot_time_series(df)
+        df, cycle_df = gcpl.analyse([gcpl_file])
+        fig, _ax = gcpl.plot(df)
         fig.savefig(folder / "results" / "gcpl.png")
         plt.close()
-        ratetest_df = cycles_to_ratetest(cycle_df)
-        df_save_bdf(df, folder / "results" / "gcpl.x", format=save_format)
+        ratetest_df = gcpl.cycles_to_ratetest(cycle_df)
+        df_save_bdf(df, folder / "results" / "gcpl.x", save_format=save_format)
 
     logger.info("↗️ Analysing LSV")
     lsv_res = {"pre": np.nan, "post": np.nan}
@@ -569,26 +131,26 @@ def analyse_sample(folder: str | Path, *, save_format: SAVE_FORMATS = "parquet")
         if len(lsv_files) == 1:
             p = "pre" if numbers[0] < 8 else "post"
             logger.warning("- Only one LSV file found, assuming it is %s", p)
-            df, results = analyse_lsv(lsv_files[0])
-            fig, _ax = plot_lsv(df, results)
+            df, results = lsv.analyse(lsv_files[0])
+            fig, _ax = lsv.plot(df, results)
             fig.savefig(folder / "results" / f"lsv_{p}.png")
             plt.close(fig)
-            df_save_bdf(df, folder / "results" / "lsv_{p}.x", format=save_format)
+            df_save_bdf(df, folder / "results" / "lsv_{p}.x", save_format=save_format)
             lsv_res[p] = float(results["Area specific resistance / Ω cm²"])
 
             results = {"Pre or post cycle": p, **results}
             lsv_df = pd.DataFrame([results])
         else:
-            df, results_pre = analyse_lsv(lsv_files[0])
-            df_save_bdf(df, folder / "results" / "lsv_pre.x", format=save_format)
-            fig, _ax = plot_lsv(df, results_pre)
+            df, results_pre = lsv.analyse(lsv_files[0])
+            df_save_bdf(df, folder / "results" / "lsv_pre.x", save_format=save_format)
+            fig, _ax = lsv.plot(df, results_pre)
             fig.savefig(folder / "results" / "lsv_pre.png")
             plt.close(fig)
             lsv_res["pre"] = float(results_pre["Area specific resistance / Ω cm²"])
 
-            df, results_post = analyse_lsv(lsv_files[-1])
-            df_save_bdf(df, folder / "results" / "lsv_post.x", format=save_format)
-            fig, _ax = plot_lsv(df, results_post)
+            df, results_post = lsv.analyse(lsv_files[-1])
+            df_save_bdf(df, folder / "results" / "lsv_post.x", save_format=save_format)
+            fig, _ax = lsv.plot(df, results_post)
             fig.savefig(folder / "results" / "lsv_post.png")
             plt.close(fig)
             lsv_res["post"] = float(results_post["Area specific resistance / Ω cm²"])
@@ -600,22 +162,22 @@ def analyse_sample(folder: str | Path, *, save_format: SAVE_FORMATS = "parquet")
                 ]
             )
 
-    logger.info("🚴 Analysing CVA")
-    cva_res = {"pre": np.nan, "post": np.nan}
-    if len(cva_files_before) == 0 and len(cva_files_after) == 0:
-        logger.warning("- ☹️ No CVA files found, skipping")
+    logger.info("🚴 Analysing CV")
+    cv_res = {"pre": np.nan, "post": np.nan}
+    if len(cv_files_before) == 0 and len(cv_files_after) == 0:
+        logger.warning("- ☹️ No  files found, skipping")
     else:
-        for p, cva_files in [("pre", cva_files_before), ("post", cva_files_after)]:
-            if not cva_files:
+        for p, cv_files in [("pre", cv_files_before), ("post", cv_files_after)]:
+            if not cv_files:
                 continue
-            if len(cva_files) > 1:
-                logger.warning("More than one CVA file, only reading %s", cva_files[0].stem)
-            df, cva_df, capacitance_mF = get_cva_capacitance(cva_files[0])
-            df_save_bdf(df, folder / "results" / f"cva_{p}.x", format=save_format)
-            fig, _ax = plot_cva_capacitance(df, cva_df)
-            fig.savefig(folder / "results" / f"cva_{p}.png")
+            if len(cv_files) > 1:
+                logger.warning("More than one CV file, only reading %s", cv_files[0].stem)
+            df, cv_df, capacitance_mF = cv.analyse(cv_files[0])
+            df_save_bdf(df, folder / "results" / f"cv_{p}.x", save_format=save_format)
+            fig, _ax = cv.plot(df, cv_df)
+            fig.savefig(folder / "results" / f"cv_{p}.png")
             plt.close(fig)
-            cva_res[p] = capacitance_mF
+            cv_res[p] = capacitance_mF
 
     logger.info("🌈 Analysing PEIS")
     eis_res = {}
@@ -628,13 +190,13 @@ def analyse_sample(folder: str | Path, *, save_format: SAVE_FORMATS = "parquet")
             f = Path(eis_file)
             try:
                 df = read_to_bdf(f)
-                params, Z_fit = fit_eis(df)
-                fig, _ax = plot_eis(df, Z_fit)
+                params, Z_fit = eis.analyse(df)
+                fig, _ax = eis.plot(df, Z_fit)
                 fig.savefig(folder / "results" / f"eis_{tag}.png")
                 eis_res[tag] = params
                 df["Real Impedance Fit / ohm"] = np.real(Z_fit)
                 df["Real Impedance Fit / ohm"] = np.imag(Z_fit)
-                df_save_bdf(df, folder / "results" / f"eis_{tag}.x", format=save_format)
+                df_save_bdf(df, folder / "results" / f"eis_{tag}.x", save_format=save_format)
                 for name, values in params.items():
                     rows.append({"file": f.stem, "tag": tag, "name": name, **values})
             except Exception as e:
@@ -685,14 +247,14 @@ def analyse_sample(folder: str | Path, *, save_format: SAVE_FORMATS = "parquet")
     summary = {col: {"Value": np.nan, "Error": np.nan} for col in cols}
 
     # Now fill in values
-    summary["Av. OCV / V"]["Value"] = ocv[0]
-    summary["Av. OCV / V"]["Error"] = ocv[1]
+    summary["Av. OCV / V"]["Value"] = av_ocv[0]
+    summary["Av. OCV / V"]["Error"] = av_ocv[1]
     summary["ASR pre / Ω cm²"]["Value"] = lsv_res["pre"]
     summary["ASR post / Ω cm²"]["Value"] = lsv_res["post"]
     summary["∆ASR / Ω cm²"]["Value"] = lsv_res["post"] - lsv_res["pre"]
-    summary["F pre / mF"]["Value"] = cva_res["pre"]
-    summary["F post / mF"]["Value"] = cva_res["post"]
-    summary["∆F / mF"]["Value"] = cva_res["post"] - cva_res["pre"]
+    summary["F pre / mF"]["Value"] = cv_res["pre"]
+    summary["F post / mF"]["Value"] = cv_res["post"]
+    summary["∆F / mF"]["Value"] = cv_res["post"] - cv_res["pre"]
     summary["Assembled resistance / Ω"]["Value"] = get_res_from_filename(gcpl_files[0].stem)
     summary["EIS R pre / Ω"]["Value"] = eis_res.get("pre", {}).get("R0", {}).get("value")
     summary["EIS R pre / Ω"]["Error"] = eis_res.get("pre", {}).get("R0", {}).get("err")
@@ -767,10 +329,10 @@ def analyse_sample(folder: str | Path, *, save_format: SAVE_FORMATS = "parquet")
         ratetest_df.to_excel(writer, sheet_name="Ratetest", index=False)
         worksheet = writer.sheets["Ratetest"]
         worksheet.autofit()
-    if cva_df is not None:
-        cva_df = cva_df.loc[:, ["CV Cycle", *[c for c in cva_df.columns if c not in ["CV Cycle"]]]]
-        cva_df.to_excel(writer, sheet_name="CVA", index=False)
-        worksheet = writer.sheets["CVA"]
+    if cv_df is not None:
+        cv_df = cv_df.loc[:, ["CV Cycle", *[c for c in cv_df.columns if c not in ["CV Cycle"]]]]
+        cv_df.to_excel(writer, sheet_name="CV", index=False)
+        worksheet = writer.sheets["CV"]
         worksheet.autofit()
     if lsv_df is not None:
         lsv_df.to_excel(writer, sheet_name="LSV", index=False)
