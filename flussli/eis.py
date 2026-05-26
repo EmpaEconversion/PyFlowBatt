@@ -7,6 +7,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from impedance.models.circuits import CustomCircuit
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
 
 
 def analyse(
@@ -37,7 +39,7 @@ def analyse(
     return params, Z_fit
 
 
-def plot(df: pd.DataFrame, Z_fit: np.ndarray) -> tuple:
+def plot(df: pd.DataFrame, Z_fit: np.ndarray) -> tuple[Figure, list[Axes]]:
     """Nyquist plot fit result."""
     Z = df["Real Impedance / ohm"] + 1j * df["Imaginary Impedance / ohm"]
     fig, axs = plt.subplots(nrows=2)

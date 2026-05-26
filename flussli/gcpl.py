@@ -10,13 +10,15 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
 
 from flussli.read import read_to_bdf
 
 logger = logging.getLogger(__name__)
 
 
-def plot(df: pd.DataFrame) -> tuple:
+def plot(df: pd.DataFrame) -> tuple[Figure, Axes]:
     """Plot time series data."""
     fig, ax = plt.subplots()
     df = df.reset_index()

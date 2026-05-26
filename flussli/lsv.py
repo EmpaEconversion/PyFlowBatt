@@ -8,6 +8,8 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
 
 from flussli.read import read_to_bdf
 
@@ -27,7 +29,7 @@ def _read_lsv(filepath: Path | str) -> pd.DataFrame:
 
 
 def analyse(filepath: Path | str) -> tuple[pd.DataFrame, dict[str, float | str]]:
-    """Extract data from LSV, fit line and return resistance."""
+    """Extract data from LSV, fit a straight line to get resistance."""
     # Read file to df
     df = _read_lsv(filepath)
 
@@ -52,7 +54,7 @@ def analyse(filepath: Path | str) -> tuple[pd.DataFrame, dict[str, float | str]]
     return df, results
 
 
-def plot(df: pd.DataFrame, results: dict[str, float | str]) -> tuple:
+def plot(df: pd.DataFrame, results: dict[str, float | str]) -> tuple[Figure, Axes]:
     """Take LSV data df and results dict and plot."""
     # Plot the data
     fig, ax = plt.subplots()

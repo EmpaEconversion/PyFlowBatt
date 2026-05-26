@@ -9,6 +9,8 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
 
 from flussli.read import read_to_bdf
 
@@ -102,7 +104,7 @@ def analyse(
     return df[full_mask], cv_df, capacitance_mF
 
 
-def plot(df: pd.DataFrame, cv_df: pd.DataFrame) -> tuple:
+def plot(df: pd.DataFrame, cv_df: pd.DataFrame) -> tuple[Figure, Axes]:
     """Plot cyclic voltammetry data."""
     fig, ax = plt.subplots(ncols=2)
     ax[0].plot(df["Voltage / V"], df["Current / A"])
