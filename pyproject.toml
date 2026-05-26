@@ -13,6 +13,7 @@ dependencies = [
     "tqdm>=4.67.1",
     "xlsxwriter>=3.2.9",
     "yadg>=6.2.2,<7.0.0",
+    "tomli>=2.0.0; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]

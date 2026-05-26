@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 from flussli import cv, eis, gcpl, lsv, ocv
+from flussli.config import FlussliConfig
 from flussli.read import read_to_bdf
 
 logger = logging.getLogger(__name__)
@@ -32,13 +33,21 @@ def get_res_from_filename(s: str) -> float:
     return np.nan
 
 
-def get_sampleid_from_folderpath(folderpath: str | Path) -> str:
+def get_sampleid_from_folderpath(
+    folderpath: str | Path,
+    config: FlussliConfig | None = None,
+) -> str:
     """Get the sample ID given a folder to a sample.
 
     Usually it is just the folder name, sometimes the parent.
+    Pass a ``FlussliConfig`` to use a custom pattern or an explicit name.
     """
     folderpath = Path(folderpath)
-    pattern = r"^\d+_.+_.+$"
+
+    if config is not None and config.sample_id is not None:
+        return config.sample_id
+
+    pattern = config.sample_id_pattern if config is not None else r"^\d+_.+_.+$"
     # Sample ID has format [digits]_[somethingelse]_[somethingelse]
     # e.g. 250115_reda_1M-blahblahblah
     if re.match(pattern=pattern, string=folderpath.stem):
@@ -66,18 +75,57 @@ def df_save_bdf(df: pd.DataFrame, filepath: Path, save_format: SAVE_FORMATS = "p
     raise ValueError(msg)
 
 
-def analyse_sample(folder: str | Path, *, save_format: SAVE_FORMATS = "parquet") -> None:
-    """Read all the files in a folder, analayse and plot everything."""
+def _glob_patterns(folder: Path, patterns: list[str], extensions: list[str]) -> list[Path]:
+    """Return deduplicated files matching any stem pattern x extension combination."""
+    seen: set[Path] = set()
+    results: list[Path] = []
+    for pattern in patterns:
+        for ext in extensions:
+            for p in folder.glob(f"{pattern}{ext}"):
+                if p not in seen:
+                    seen.add(p)
+                    results.append(p)
+    return results
+
+
+def analyse_sample(
+    folder: str | Path,
+    *,
+    save_format: SAVE_FORMATS = "parquet",
+    config: FlussliConfig | None = None,
+    gcpl_files: list[Path] | None = None,
+    ocv_files: list[Path] | None = None,
+    lsv_files: list[Path] | None = None,
+    cv_files_before: list[Path] | None = None,
+    cv_files_after: list[Path] | None = None,
+    eis_files: list[Path] | None = None,
+) -> None:
+    """Read all the files in a folder, analayse and plot everything.
+
+    Without explicit files, it will attempt auto-detection for that technique.
+    Place a ``flussli.toml`` in the folder/parent/home directory to customise
+    glob patterns and sample ID detection. Or pass a FlussliConfig in Python.
+    """
     folder = Path(folder)
 
+    if config is None:
+        config = FlussliConfig.load(folder)
+
     logger.info("\n🌊 Flussli-ing %s", folder.name)
-    gcpl_files = list(folder.glob("*_GCPL_*.mpr"))
+    exts = config.extensions
+    if gcpl_files is None:
+        gcpl_files = _glob_patterns(folder, config.gcpl_patterns, exts)
     gcpl_file = max(gcpl_files, key=lambda x: x.stat().st_size) if gcpl_files else None
-    ocv_files = list(folder.glob("*_OCV_*.mpr"))
-    lsv_files = list(folder.glob("*_LSV_*.mpr"))
-    cv_files_before = list(folder.glob("*_CVApre*.mpr")) + list(folder.glob("*_CVpre*.mpr"))
-    cv_files_after = list(folder.glob("*_CVApost*.mpr")) + list(folder.glob("*_CVpost*.mpr"))
-    eis_files = list(folder.glob("*_PEIS_*.mpr"))
+    if ocv_files is None:
+        ocv_files = _glob_patterns(folder, config.ocv_patterns, exts)
+    if lsv_files is None:
+        lsv_files = _glob_patterns(folder, config.lsv_patterns, exts)
+    if cv_files_before is None:
+        cv_files_before = _glob_patterns(folder, config.cv_before_patterns, exts)
+    if cv_files_after is None:
+        cv_files_after = _glob_patterns(folder, config.cv_after_patterns, exts)
+    if eis_files is None:
+        eis_files = _glob_patterns(folder, config.eis_patterns, exts)
     logger.debug("Reading GCPL: %s", ", ".join([f.stem for f in gcpl_files]))
     logger.debug("Reading LSV: %s", ", ".join([f.stem for f in lsv_files]))
     logger.debug("Reading CV before: %s", ", ".join([f.stem for f in cv_files_before]))
@@ -346,38 +394,49 @@ def analyse_sample(folder: str | Path, *, save_format: SAVE_FORMATS = "parquet")
     workbook.close()
 
 
-def is_sample_folder(folderpath: str | Path) -> bool:
-    """Determine whether a folder is a sample folder. A sample folder contains at least 1 mpr file."""
+def is_sample_folder(folderpath: str | Path, config: FlussliConfig | None = None) -> bool:
+    """Determine whether a folder is a sample folder.
+
+    A sample folder contains at least one file matching any configured technique pattern.
+    Short-circuits on the first match found.
+    """
     folderpath = Path(folderpath)
     if not folderpath.is_dir():
         return False
-    return bool(list(folderpath.glob("*.mpr")))
+    patterns = (config if config is not None else FlussliConfig()).all_patterns()
+    return any(next(folderpath.glob(p), None) is not None for p in patterns)
 
 
-def find_all_sample_folders(folder: str | Path) -> list[Path]:
+def find_all_sample_folders(folder: str | Path, config: FlussliConfig | None = None) -> list[Path]:
     """Find all sample folders in a folder. Search 2 folders deep."""
     folder = Path(folder)
+    if config is None:
+        config = FlussliConfig.load(folder)
     sample_folders = []
-    if is_sample_folder(folder):  # It's just a sample folder
+    if is_sample_folder(folder, config):
         return [folder]
     for subfolder in folder.iterdir():
         if not subfolder.is_dir():
             continue
-        if is_sample_folder(subfolder):
+        if is_sample_folder(subfolder, config):
             sample_folders.append(subfolder)
         else:
             for subsubfolder in subfolder.iterdir():
                 if not subsubfolder.is_dir():
                     continue
-                if is_sample_folder(subsubfolder):
+                if is_sample_folder(subsubfolder, config):
                     sample_folders.append(subsubfolder)
     return sample_folders
 
 
-def find_all_sample_summaries(folder: str | Path) -> list[Path]:
+def find_all_sample_summaries(
+    folder: str | Path, config: FlussliConfig | None = None
+) -> list[Path]:
     """Collect all summary excels from all subfolders."""
     folder = Path(folder)
-    sample_folders = find_all_sample_folders(folder)
+    if config is None:
+        config = FlussliConfig.load(folder)
+    sample_folders = find_all_sample_folders(folder, config)
     return [
         f / "results" / "summary.xlsx"
         for f in sample_folders
@@ -388,7 +447,10 @@ def find_all_sample_summaries(folder: str | Path) -> list[Path]:
 def merge_summaries(summary_xlsxs: list[str | Path]) -> pd.DataFrame:
     """Merge all summary sheets into one mega summary."""
     summary_xlsxs_paths = [Path(s).resolve() for s in summary_xlsxs]
-    names = [get_sampleid_from_folderpath(s.parent.parent) for s in summary_xlsxs_paths]
+    names = [
+        get_sampleid_from_folderpath(s.parent.parent, FlussliConfig.load(s.parent.parent))
+        for s in summary_xlsxs_paths
+    ]
     # append a number to duplicate names
     for i, name in enumerate(names):
         if names.count(name) > 1:
@@ -415,18 +477,19 @@ def merge_summaries(summary_xlsxs: list[str | Path]) -> pd.DataFrame:
 def analyse_all_samples(folder: str | Path, *, save_format: SAVE_FORMATS = "parquet") -> None:
     """Take a folder and run all analysis."""
     folder = Path(folder).resolve()
-    samples = find_all_sample_folders(folder)
+    config = FlussliConfig.load(folder)
+    samples = find_all_sample_folders(folder, config)
     if len(samples) == 0:
         logger.error("No sample folders found in %s", folder)
         return
     if len(samples) == 1:
-        analyse_sample(samples[0], save_format=save_format)
+        analyse_sample(samples[0], save_format=save_format, config=config)
     else:
         logger.info("Found %d sample folders:", len(samples))
         for s in samples:
-            analyse_sample(s, save_format=save_format)
+            analyse_sample(s, save_format=save_format, config=config)
 
-        summaries = find_all_sample_summaries(folder)
+        summaries = find_all_sample_summaries(folder, config)
         df = merge_summaries(summaries)
         (folder / "combined_results").mkdir(exist_ok=True)
         writer = pd.ExcelWriter(
@@ -443,7 +506,8 @@ def analyse_all_samples(folder: str | Path, *, save_format: SAVE_FORMATS = "parq
 def dry_analyse_all_samples(folder: str | Path) -> None:
     """Take a folder and tell the user what flussli would do."""
     folder = Path(folder).resolve()
-    samples = find_all_sample_folders(folder)
+    config = FlussliConfig.load(folder)
+    samples = find_all_sample_folders(folder, config)
     if len(samples) == 0:
         logger.error("No sample folders found in %s", folder)
         return
