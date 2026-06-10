@@ -15,6 +15,8 @@ from flussli.read import read_to_bdf
 logger = logging.getLogger(__name__)
 
 SAVE_FORMATS = Literal["parquet", "csv"] | None
+DEFAULT_DEPTH = 6  # Default max search depth in folders
+DEFAULT_SEARCH = 10000  # Default max number of folders searched
 
 
 def get_res_from_filename(s: str) -> float:
@@ -364,30 +366,63 @@ def is_sample_folder(folderpath: str | Path) -> bool:
     return bool(list(folderpath.glob("*.mpr")))
 
 
-def find_all_sample_folders(folder: str | Path) -> list[Path]:
-    """Find all sample folders in a folder. Search 2 folders deep."""
+def find_all_sample_folders(
+    folder: str | Path,
+    max_search_depth: int = DEFAULT_DEPTH,
+    max_folder_searches: int = DEFAULT_SEARCH,
+) -> list[Path]:
+    """Find all sample folders in a folder."""
     folder = Path(folder)
-    sample_folders = []
-    if is_sample_folder(folder):  # It's just a sample folder
+    if is_sample_folder(folder):
         return [folder]
-    for subfolder in folder.iterdir():
-        if not subfolder.is_dir():
-            continue
-        if is_sample_folder(subfolder):
-            sample_folders.append(subfolder)
-        else:
-            for subsubfolder in subfolder.iterdir():
-                if not subsubfolder.is_dir():
-                    continue
-                if is_sample_folder(subsubfolder):
-                    sample_folders.append(subsubfolder)
+    sample_folders = []
+    depth_exceeded_count = 0
+    folders_searched = 0
+
+    def recursive_check_folder(folder: Path, depth: int = 1) -> None:
+        """Depth-first search for sample folders."""
+        nonlocal folders_searched, depth_exceeded_count
+        folders_searched += 1
+        if folders_searched > max_folder_searches:
+            return
+        if depth > max_search_depth:
+            depth_exceeded_count += 1
+            return
+        if is_sample_folder(folder):
+            sample_folders.append(folder)
+            return
+        for subfolder in folder.iterdir():
+            try:
+                if subfolder.is_dir():
+                    recursive_check_folder(subfolder, depth + 1)
+            except (PermissionError, OSError):  # noqa: PERF203
+                logger.error("Permission error on %s", subfolder)  # noqa: TRY400
+
+    recursive_check_folder(folder)
+    if depth_exceeded_count:
+        logger.warning(
+            "Search depth (%d) exceeded %d time(s) while looking for sample folders.",
+            max_search_depth,
+            depth_exceeded_count,
+        )
+    if folders_searched > max_folder_searches:
+        logger.critical(
+            "WARNING: Exceeded maximum number of folder searches (%d)!"
+            "\nMake sure you are running flussli on the correct folder!",
+            max_folder_searches,
+        )
+
     return sample_folders
 
 
-def find_all_sample_summaries(folder: str | Path) -> list[Path]:
+def find_all_sample_summaries(
+    folder: str | Path,
+    max_search_depth: int = DEFAULT_DEPTH,
+    max_folder_searches: int = DEFAULT_SEARCH,
+) -> list[Path]:
     """Collect all summary excels from all subfolders."""
     folder = Path(folder)
-    sample_folders = find_all_sample_folders(folder)
+    sample_folders = find_all_sample_folders(folder, max_search_depth, max_folder_searches)
     return [
         f / "results" / "summary.xlsx"
         for f in sample_folders
@@ -422,10 +457,16 @@ def merge_summaries(summary_xlsxs: list[str | Path]) -> pd.DataFrame:
     return df[cols]
 
 
-def analyse_all_samples(folder: str | Path, *, save_format: SAVE_FORMATS = "parquet") -> None:
+def analyse_all_samples(
+    folder: str | Path,
+    *,
+    save_format: SAVE_FORMATS = "parquet",
+    max_search_depth: int = DEFAULT_DEPTH,
+    max_folder_searches: int = DEFAULT_SEARCH,
+) -> None:
     """Take a folder and run all analysis."""
     folder = Path(folder).resolve()
-    samples = find_all_sample_folders(folder)
+    samples = find_all_sample_folders(folder, max_search_depth, max_folder_searches)
     if len(samples) == 0:
         logger.error("No sample folders found in %s", folder)
         return
@@ -436,7 +477,7 @@ def analyse_all_samples(folder: str | Path, *, save_format: SAVE_FORMATS = "parq
         for s in samples:
             analyse_sample(s, save_format=save_format)
 
-        summaries = find_all_sample_summaries(folder)
+        summaries = find_all_sample_summaries(folder, max_search_depth, max_folder_searches)
         df = merge_summaries(summaries)
         (folder / "combined_results").mkdir(exist_ok=True)
         writer = pd.ExcelWriter(
@@ -450,19 +491,27 @@ def analyse_all_samples(folder: str | Path, *, save_format: SAVE_FORMATS = "parq
         logger.info("\n🎉 Combined all the results into one big summary")
 
 
-def dry_analyse_all_samples(folder: str | Path) -> None:
+def dry_analyse_all_samples(
+    folder: str | Path,
+    max_search_depth: int = DEFAULT_DEPTH,
+    max_folder_searches: int = DEFAULT_SEARCH,
+) -> None:
     """Take a folder and tell the user what flussli would do."""
+    logger.info("Beginning dry-run search.")
     folder = Path(folder).resolve()
-    samples = find_all_sample_folders(folder)
+    samples = find_all_sample_folders(folder, max_search_depth, max_folder_searches)
     if len(samples) == 0:
         logger.error("No sample folders found in %s", folder)
         return
     if len(samples) == 1:
-        logger.info("Found one sample inside")
+        logger.info("Found 1 sample inside")
     else:
-        logger.info("Found several samples inside.")
+        logger.info("Found %d samples inside.", len(samples))
     logger.info("I would analyse the following samples and make a 'results' subfolder inside:")
     for s in samples:
         logger.info("  - %s", s)
     if len(samples) > 1:
-        logger.info("Then I would combine all the summaries into one 'combined_results' subfolder.")
+        logger.info(
+            "Then I would combine all the summaries into one 'combined_results' subfolder inside %s.",
+            folder,
+        )
