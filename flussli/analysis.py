@@ -98,7 +98,10 @@ def analyse_sample(folder: str | Path, *, save_format: SAVE_FORMATS = "parquet")
     else:
         if len(ocv_files) > 1:
             logger.warning("- More than one OCV file, only reading %s", ocv_files[0].stem)
-        av_ocv = ocv.analyse(ocv_files[0])
+        try:
+            av_ocv = ocv.analyse(ocv_files[0])
+        except ValueError:
+            logger.exception("Failed to analyse OCV")
 
     logger.info("🔋 Analysing GCPL")
     if gcpl_file is None:
@@ -107,7 +110,7 @@ def analyse_sample(folder: str | Path, *, save_format: SAVE_FORMATS = "parquet")
         df, cycle_df = gcpl.analyse([gcpl_file])
         fig, _ax = gcpl.plot(df)
         fig.savefig(folder / "results" / "gcpl.png")
-        plt.close()
+        plt.close(fig)
         ratetest_df = gcpl.cycles_to_ratetest(cycle_df)
         df_save_bdf(df, folder / "results" / "gcpl.x", save_format=save_format)
 
@@ -131,36 +134,42 @@ def analyse_sample(folder: str | Path, *, save_format: SAVE_FORMATS = "parquet")
         if len(lsv_files) == 1:
             p = "pre" if numbers[0] < 8 else "post"
             logger.warning("- Only one LSV file found, assuming it is %s", p)
-            df, results = lsv.analyse(lsv_files[0])
-            fig, _ax = lsv.plot(df, results)
-            fig.savefig(folder / "results" / f"lsv_{p}.png")
-            plt.close(fig)
-            df_save_bdf(df, folder / "results" / "lsv_{p}.x", save_format=save_format)
-            lsv_res[p] = float(results["Area specific resistance / Ω cm²"])
+            try:
+                df, results = lsv.analyse(lsv_files[0])
+                fig, _ax = lsv.plot(df, results)
+                fig.savefig(folder / "results" / f"lsv_{p}.png")
+                plt.close(fig)
+                df_save_bdf(df, folder / "results" / "lsv_{p}.x", save_format=save_format)
+                lsv_res[p] = float(results["Area specific resistance / Ω cm²"])
 
-            results = {"Pre or post cycle": p, **results}
-            lsv_df = pd.DataFrame([results])
+                results = {"Pre or post cycle": p, **results}
+                lsv_df = pd.DataFrame([results])
+            except ValueError:
+                logger.exception("Failed to analyse LSV file")
         else:
-            df, results_pre = lsv.analyse(lsv_files[0])
-            df_save_bdf(df, folder / "results" / "lsv_pre.x", save_format=save_format)
-            fig, _ax = lsv.plot(df, results_pre)
-            fig.savefig(folder / "results" / "lsv_pre.png")
-            plt.close(fig)
-            lsv_res["pre"] = float(results_pre["Area specific resistance / Ω cm²"])
+            try:
+                df, results_pre = lsv.analyse(lsv_files[0])
+                df_save_bdf(df, folder / "results" / "lsv_pre.x", save_format=save_format)
+                fig, _ax = lsv.plot(df, results_pre)
+                fig.savefig(folder / "results" / "lsv_pre.png")
+                plt.close(fig)
+                lsv_res["pre"] = float(results_pre["Area specific resistance / Ω cm²"])
 
-            df, results_post = lsv.analyse(lsv_files[-1])
-            df_save_bdf(df, folder / "results" / "lsv_post.x", save_format=save_format)
-            fig, _ax = lsv.plot(df, results_post)
-            fig.savefig(folder / "results" / "lsv_post.png")
-            plt.close(fig)
-            lsv_res["post"] = float(results_post["Area specific resistance / Ω cm²"])
+                df, results_post = lsv.analyse(lsv_files[-1])
+                df_save_bdf(df, folder / "results" / "lsv_post.x", save_format=save_format)
+                fig, _ax = lsv.plot(df, results_post)
+                fig.savefig(folder / "results" / "lsv_post.png")
+                plt.close(fig)
+                lsv_res["post"] = float(results_post["Area specific resistance / Ω cm²"])
 
-            lsv_df = pd.DataFrame(
-                [
-                    {"Pre or post cycle": "pre", **results_pre},
-                    {"Pre or post cycle": "post", **results_post},
-                ]
-            )
+                lsv_df = pd.DataFrame(
+                    [
+                        {"Pre or post cycle": "pre", **results_pre},
+                        {"Pre or post cycle": "post", **results_post},
+                    ]
+                )
+            except ValueError:
+                logger.exception("Failed to analyse LSV file")
 
     logger.info("🚴 Analysing CV")
     cv_res = {"pre": np.nan, "post": np.nan}
@@ -193,6 +202,7 @@ def analyse_sample(folder: str | Path, *, save_format: SAVE_FORMATS = "parquet")
                 params, Z_fit = eis.analyse(df)
                 fig, _ax = eis.plot(df, Z_fit)
                 fig.savefig(folder / "results" / f"eis_{tag}.png")
+                plt.close(fig)
                 eis_res[tag] = params
                 df["Real Impedance Fit / ohm"] = np.real(Z_fit)
                 df["Real Impedance Fit / ohm"] = np.imag(Z_fit)
