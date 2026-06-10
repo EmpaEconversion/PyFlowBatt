@@ -39,17 +39,14 @@ def analyse(
     return params, Z_fit
 
 
-def plot(df: pd.DataFrame, Z_fit: np.ndarray) -> tuple[Figure, list[Axes]]:
+def plot(df: pd.DataFrame, Z_fit: np.ndarray) -> tuple[Figure, Axes]:
     """Nyquist plot fit result."""
     Z = df["Real Impedance / ohm"] + 1j * df["Imaginary Impedance / ohm"]
-    fig, axs = plt.subplots(nrows=2)
-    for ax in axs:
-        ax.plot(np.real(Z), -np.imag(Z), "o", label="Data")
-        ax.plot(np.real(Z_fit), -np.imag(Z_fit), "-", label="Fit")
-        ax.legend()
-        ax.set_xlabel("Real Impedance / ohm")
-        ax.set_ylabel("Imaginary Impedance / ohm")
-    axs[1].set_yscale("log")
-    axs[1].set_xscale("log")
+    fig, ax = plt.subplots()
+    ax.plot(np.real(Z), -np.imag(Z), "o", label="Data")
+    ax.plot(np.real(Z_fit), -np.imag(Z_fit), "-", label="Fit")
+    ax.legend()
+    ax.set_xlabel("Real Impedance / ohm")
+    ax.set_ylabel("Imaginary Impedance / ohm")
     fig.tight_layout()
-    return fig, axs
+    return fig, ax
