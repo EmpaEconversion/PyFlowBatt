@@ -24,7 +24,11 @@ def get_res_from_filename(s: str) -> float:
     match = re.search(r"_([\d.,]+)([kM]?Ohm)_", s)
 
     if match:
-        value = float(match.group(1))
+        value_str = match.group(1)
+        try:
+            value = float(value_str)
+        except ValueError:
+            value = float(value_str.replace(",", "."))
         unit = match.group(2)
         if unit == "kOhm":
             value *= 1e3
