@@ -7,7 +7,13 @@ from pathlib import Path
 from flussli.analysis import analyse_all_samples, dry_analyse_all_samples
 
 
-def flussli(folder: str | None = None, *, dry: bool = False) -> None:
+def flussli(
+    folder: str | None = None,
+    *,
+    dry: bool = False,
+    max_folder_searches: int = 10000,
+    max_search_depth: int = 6,
+) -> None:
     """Run flussli on a folder."""
     folderpath = Path.cwd() if not folder else Path(folder)
     logger = logging.getLogger("flussli")
@@ -19,9 +25,17 @@ def flussli(folder: str | None = None, *, dry: bool = False) -> None:
         logger.error("%s is not a directory", folderpath)
         return
     if dry:
-        dry_analyse_all_samples(folderpath)
+        dry_analyse_all_samples(
+            folderpath,
+            max_folder_searches=max_folder_searches,
+            max_search_depth=max_search_depth,
+        )
     else:
-        analyse_all_samples(folderpath)
+        analyse_all_samples(
+            folderpath,
+            max_folder_searches=max_folder_searches,
+            max_search_depth=max_search_depth,
+        )
 
 
 def main() -> None:
@@ -33,8 +47,23 @@ def main() -> None:
     parser.add_argument(
         "--folder", type=str, help="Folder to analyse, if not specified, analyse current folder"
     )
+    parser.add_argument(
+        "--max-folder-searches",
+        type=int,
+        help="Maximum number of folders that can be checked when looking for sample folders",
+    )
+    parser.add_argument(
+        "--max-search-depth",
+        type=int,
+        help="Maximum depth of searching when looking for sample folders",
+    )
     args = parser.parse_args()
-    flussli(folder=args.folder, dry=args.dry)
+    kwargs: dict = {}
+    if args.max_folder_searches is not None:
+        kwargs["max_folder_searches"] = args.max_folder_searches
+    if args.max_search_depth is not None:
+        kwargs["max_search_depth"] = args.max_search_depth
+    flussli(folder=args.folder, dry=args.dry, **kwargs)
 
 
 if __name__ == "__main__":
