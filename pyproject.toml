@@ -13,6 +13,7 @@ dependencies = [
     "pyarrow>=21.0.0",
     "tqdm>=4.67.1",
     "xlsxwriter>=3.2.9",
+    "rocrate>=0.9",
     "yadg>=6.2.2,<7.0.0",
 ]
 
