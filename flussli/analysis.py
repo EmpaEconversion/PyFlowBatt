@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 from battinfoconverter_backend import convert_excel_to_jsonld
 
-from flussli import cv, eis, gcpl, lsv, ocv, battinfo
+from flussli import battinfo, cv, eis, gcpl, lsv, ocv
 from flussli.read import read_to_bdf
 
 logger = logging.getLogger(__name__)
