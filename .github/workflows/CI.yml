@@ -35,4 +35,4 @@ jobs:
         run: ruff check --select=F,E9,B
 
       - name: Run tests with pytest
-        run: pytest --cov=flussli --cov-report=term
+        run: pytest --cov=pyflowbatt --cov-report=term

@@ -1,4 +1,4 @@
-"""Write RO-Crate metadata for a batch flussli analysis."""
+"""Write RO-Crate metadata for a batch PyFlowBatt analysis."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from pathlib import Path
 
 from rocrate.rocrate import ROCrate
 
-from flussli.analysis import get_sampleid_from_folderpath
+from PyFlowBatt.analysis import get_sampleid_from_folderpath
 
 MEASUREMENT_LABELS: dict[str, str] = {
     "gcpl": "Galvanostatic Cycling with Potential Limitation",
@@ -108,7 +108,7 @@ def write_rocrate(
     crate = ROCrate()
     crate.root_dataset["name"] = root_folder.name
     crate.root_dataset["description"] = (
-        f"Flow battery electrochemical analysis produced by flussli for {root_folder.name}"
+        f"Flow battery electrochemical analysis produced by PyFlowBatt for {root_folder.name}"
     )
     crate.root_dataset["license"] = {"@id": "https://creativecommons.org/licenses/by/4.0/"}
 
