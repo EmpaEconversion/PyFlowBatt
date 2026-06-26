@@ -5,7 +5,7 @@ OCV = open circuit voltage.
 
 from pathlib import Path
 
-from flussli.read import read_to_bdf
+from PyFlowBatt.read import read_to_bdf
 
 
 def analyse(file: str | Path) -> tuple[float, float]:

@@ -1,26 +1,26 @@
-"""Flussli CLI."""
+"""PyFlowBatt CLI."""
 
 import argparse
 import logging
 from pathlib import Path
 
-from flussli.analysis import analyse_all_samples, dry_analyse_all_samples
+from PyFlowBatt.analysis import analyse_all_samples, dry_analyse_all_samples
 
 
-def flussli(
+def analyse(
     folder: str | None = None,
     *,
     dry: bool = False,
     max_folder_searches: int = 10000,
     max_search_depth: int = 6,
 ) -> None:
-    """Run flussli on a folder."""
+    """Run PyFlowBatt on a folder."""
     folderpath = Path.cwd() if not folder else Path(folder)
-    logger = logging.getLogger("flussli")
+    logger = logging.getLogger("PyFlowBatt")
     logger.addHandler(logging.StreamHandler())
     logger.setLevel(logging.INFO)
 
-    logger.info("Running flussli on: %s", folderpath)
+    logger.info("Running PyFlowBatt on: %s", folderpath)
     if not folderpath.is_dir():
         logger.error("%s is not a directory", folderpath)
         return
@@ -39,8 +39,8 @@ def flussli(
 
 
 def main() -> None:
-    """Flussli CLI."""
-    parser = argparse.ArgumentParser(prog="flussli")
+    """PyFlowBatt CLI."""
+    parser = argparse.ArgumentParser(prog="pyflowbatt")
     parser.add_argument(
         "--dry", action="store_true", help="Don't do any analysis, just check the folders"
     )
@@ -63,7 +63,7 @@ def main() -> None:
         kwargs["max_folder_searches"] = args.max_folder_searches
     if args.max_search_depth is not None:
         kwargs["max_search_depth"] = args.max_search_depth
-    flussli(folder=args.folder, dry=args.dry, **kwargs)
+    analyse(folder=args.folder, dry=args.dry, **kwargs)
 
 
 if __name__ == "__main__":

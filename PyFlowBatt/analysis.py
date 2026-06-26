@@ -12,8 +12,8 @@ import numpy as np
 import pandas as pd
 from battinfoconverter_backend import convert_excel_to_jsonld
 
-from flussli import battinfo, cv, eis, gcpl, lsv, ocv
-from flussli.read import read_to_bdf
+from PyFlowBatt import battinfo, cv, eis, gcpl, lsv, ocv
+from PyFlowBatt.read import read_to_bdf
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +95,7 @@ def analyse_sample(
     folder = Path(folder)
     pub_info = pub_info or {}
 
-    logger.info("\n🌊 Flussli-ing %s", folder.name)
+    logger.info("\n🌊 PyFlowBatt-ing %s", folder.name)
     gcpl_files = list(folder.glob("*_GCPL_*.mpr"))
     gcpl_file = max(gcpl_files, key=lambda x: x.stat().st_size) if gcpl_files else None
     ocv_files = list(folder.glob("*_OCV_*.mpr"))
@@ -565,7 +565,7 @@ def find_all_sample_folders(
     if folders_searched > max_folder_searches:
         logger.critical(
             "WARNING: Exceeded maximum number of folder searches (%d)!"
-            "\nMake sure you are running flussli on the correct folder!",
+            "\nMake sure you are running PyFlowBatt on the correct folder!",
             max_folder_searches,
         )
 
@@ -651,7 +651,7 @@ def analyse_all_samples(
         workbook.close()
         logger.info("\n🎉 Combined all the results into one big summary")
 
-    from flussli.rocrate_output import write_rocrate  # noqa: PLC0415
+    from PyFlowBatt.rocrate_output import write_rocrate  # noqa: PLC0415
 
     write_rocrate(folder, samples, tracked_by_sample, tracked_extras_by_sample)
     logger.info("📦 Written RO-Crate metadata to %s", folder / "ro-crate-metadata.json")
@@ -662,7 +662,7 @@ def dry_analyse_all_samples(
     max_search_depth: int = DEFAULT_DEPTH,
     max_folder_searches: int = DEFAULT_SEARCH,
 ) -> None:
-    """Take a folder and tell the user what flussli would do."""
+    """Take a folder and tell the user what PyFlowBatt would do."""
     logger.info("Beginning dry-run search.")
     folder = Path(folder).resolve()
     samples = find_all_sample_folders(folder, max_search_depth, max_folder_searches)
