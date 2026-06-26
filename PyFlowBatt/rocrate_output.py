@@ -103,6 +103,7 @@ def write_rocrate(
     sample_folders: list[Path],
     tracked_by_sample: dict[Path, dict[str, list[Path]]],
     tracked_extras_by_sample: dict[Path, dict[str, list[Path]]] | None = None,
+    fcids_by_sample: dict[Path, str | None] | None = None,
 ) -> None:
     """Write ro-crate-metadata.json at root_folder describing all inputs and outputs."""
     crate = ROCrate()
@@ -118,13 +119,14 @@ def write_rocrate(
         sample_id = get_sampleid_from_folderpath(sample_folder)
         rel_sample = _rel(sample_folder, root_folder)
 
-        sample_dataset = crate.add_dataset(
-            dest_path=rel_sample + "/",
-            properties={
-                "name": sample_id,
-                "description": f"Electrochemical cell measurements: {sample_folder.name}",
-            },
-        )
+        fcid = fcids_by_sample.get(sample_folder) if fcids_by_sample else None
+        sample_props: dict = {
+            "name": sample_id,
+            "description": f"Electrochemical cell measurements: {sample_folder.name}",
+        }
+        if fcid:
+            sample_props["identifier"] = fcid
+        sample_dataset = crate.add_dataset(dest_path=rel_sample + "/", properties=sample_props)
         all_sample_datasets.append(sample_dataset)
         sample_file_entities = []
 
