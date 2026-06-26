@@ -16,10 +16,10 @@ MEASUREMENT_LABELS: dict[str, str] = {
     "lsv_post": "Linear Sweep Voltammetry (post-cycling)",
     "cv_pre": "Cyclic Voltammetry (pre-cycling)",
     "cv_post": "Cyclic Voltammetry (post-cycling)",
-    "eis_pre": "Electrochemical Impedance Spectroscopy (pre-cycling)",
+    "eis_pre": "Electrochemical Impedance Spectroscopy (pre-cycling, 0% SOC)",
     "eis_pre-50%SOC": "Electrochemical Impedance Spectroscopy (pre-cycling, 50% SOC)",
     "eis_post-50%SOC": "Electrochemical Impedance Spectroscopy (post-cycling, 50% SOC)",
-    "eis_post": "Electrochemical Impedance Spectroscopy (post-cycling)",
+    "eis_post": "Electrochemical Impedance Spectroscopy (post-cycling, 0% SOC)",
 }
 
 ENCODING_FORMATS: dict[str, str] = {
@@ -38,10 +38,10 @@ OUTPUT_DESCRIPTIONS: dict[str, str] = {
     "lsv_post": "Post-cycling linear sweep voltammetry analysis",
     "cv_pre": "Pre-cycling cyclic voltammetry analysis",
     "cv_post": "Post-cycling cyclic voltammetry analysis",
-    "eis_pre": "EIS analysis, pre-cycling",
-    "eis_pre-50%SOC": "EIS analysis, pre-cycling 50% SOC",
-    "eis_post-50%SOC": "EIS analysis, post-cycling 50% SOC",
-    "eis_post": "EIS analysis, post-cycling",
+    "eis_pre": "EIS analysis, pre-cycling at 0% SOC",
+    "eis_pre-50%SOC": "EIS analysis, pre-cycling at 50% SOC",
+    "eis_post-50%SOC": "EIS analysis, post-cycling at 50% SOC",
+    "eis_post": "EIS analysis, post-cycling at 0% SOC",
     "summary": "Per-sample analysis summary",
     "metadata": "BattINFO JSON-LD metadata",
 }
