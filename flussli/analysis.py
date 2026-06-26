@@ -1,5 +1,7 @@
 """Utility functions for analysing flow battery data from MPR files."""
 
+import contextlib
+import json
 import logging
 import re
 from pathlib import Path
@@ -8,8 +10,9 @@ from typing import Literal
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from battinfoconverter_backend import convert_excel_to_jsonld
 
-from flussli import cv, eis, gcpl, lsv, ocv
+from flussli import cv, eis, gcpl, lsv, ocv, battinfo
 from flussli.read import read_to_bdf
 
 logger = logging.getLogger(__name__)
@@ -72,9 +75,12 @@ def df_save_bdf(df: pd.DataFrame, filepath: Path, save_format: SAVE_FORMATS = "p
     raise ValueError(msg)
 
 
-def analyse_sample(folder: str | Path, *, save_format: SAVE_FORMATS = "parquet") -> None:
+def analyse_sample(
+    folder: str | Path, *, pub_info: dict | None = None, save_format: SAVE_FORMATS = "parquet"
+) -> None:
     """Read all the files in a folder, analayse and plot everything."""
     folder = Path(folder)
+    pub_info = pub_info or {}
 
     logger.info("\n🌊 Flussli-ing %s", folder.name)
     gcpl_files = list(folder.glob("*_GCPL_*.mpr"))
@@ -84,11 +90,13 @@ def analyse_sample(folder: str | Path, *, save_format: SAVE_FORMATS = "parquet")
     cv_files_before = list(folder.glob("*_CVApre*.mpr")) + list(folder.glob("*_CVpre*.mpr"))
     cv_files_after = list(folder.glob("*_CVApost*.mpr")) + list(folder.glob("*_CVpost*.mpr"))
     eis_files = list(folder.glob("*_PEIS_*.mpr"))
+    battinfo_files = list(folder.glob("*.xlsx"))
     logger.debug("Reading GCPL: %s", ", ".join([f.stem for f in gcpl_files]))
     logger.debug("Reading LSV: %s", ", ".join([f.stem for f in lsv_files]))
     logger.debug("Reading CV before: %s", ", ".join([f.stem for f in cv_files_before]))
     logger.debug("Reading CV after:  %s", ", ".join([f.stem for f in cv_files_after]))
     logger.debug("Reading EIS files: %s", ", ".join([f.stem for f in eis_files]))
+    logger.debug("Checking BattINFO files: %s", ", ".join([f.stem for f in battinfo_files]))
 
     cycle_df = None
     cv_df = None
@@ -96,6 +104,50 @@ def analyse_sample(folder: str | Path, *, save_format: SAVE_FORMATS = "parquet")
     ratetest_df = None
     eis_df = None
     (folder / "results").mkdir(exist_ok=True)
+
+    logger.info("Battinfo-ifying")
+    if len(battinfo_files) == 0:
+        logger.info("- ☹️ No battinfo xlsx found, skipping")
+    for file in battinfo_files:
+        battinfo_json = None
+        with contextlib.suppress(ValueError):
+            battinfo_json = convert_excel_to_jsonld(file)
+        if battinfo_json is None:
+            continue
+        fcid = battinfo_json["schema:productID"]
+        sample_id = battinfo_json["schema:name"]
+        # Make test object
+        battinfo_json = battinfo.make_test_object(battinfo_json)
+
+        # Add citation string
+        if pub_info.get("citation_string"):
+            battinfo_json = battinfo.merge_jsonld_on_type(
+                [
+                    battinfo_json,
+                    battinfo.add_citation(pub_info["citation_string"]),
+                ]
+            )
+
+        # Add authors and institutions
+        if pub_info.get("authors") and pub_info.get("institutions"):
+            authors = battinfo.add_authors(pub_info["authors"], pub_info["institutions"])
+            battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, authors])
+
+        # Add publication info
+        if pub_info.get("sample_to_fig"):
+            publication_extras = battinfo.add_associated_media(
+                pub_info["publication_doi_url"],
+                pub_info["sample_to_fig"],
+                fcid,
+                sample_id,
+            )
+            battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, publication_extras])
+
+        with (folder / f"metadata.{sample_id}.json").open("w") as f:
+            json.dump(battinfo_json, f, indent=4)
+        break
+    else:
+        logger.info("- ☹️ Couldn't convert battinfo xlsx")
 
     logger.info("⛓️‍💥 Analysing OCV")
     if len(ocv_files) == 0:
@@ -472,16 +524,17 @@ def analyse_all_samples(
 ) -> None:
     """Take a folder and run all analysis."""
     folder = Path(folder).resolve()
+    pub_info = pub_info_from_root(folder)
     samples = find_all_sample_folders(folder, max_search_depth, max_folder_searches)
     if len(samples) == 0:
         logger.error("No sample folders found in %s", folder)
         return
     if len(samples) == 1:
-        analyse_sample(samples[0], save_format=save_format)
+        analyse_sample(samples[0], save_format=save_format, pub_info=pub_info)
     else:
         logger.info("Found %d sample folders:", len(samples))
         for s in samples:
-            analyse_sample(s, save_format=save_format)
+            analyse_sample(s, save_format=save_format, pub_info=pub_info)
 
         summaries = find_all_sample_summaries(folder, max_search_depth, max_folder_searches)
         df = merge_summaries(summaries)
@@ -521,3 +574,12 @@ def dry_analyse_all_samples(
             "Then I would combine all the summaries into one 'combined_results' subfolder inside %s.",
             folder,
         )
+
+
+def pub_info_from_root(folder: Path) -> dict:
+    """Get publication info from xlsx in root folder."""
+    candidate_files = folder.glob("*.xlsx")
+    for file in candidate_files:
+        with contextlib.suppress(Exception):
+            return battinfo.parse_zenodo_info_xlsx(file)
+    return {}
