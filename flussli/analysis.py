@@ -270,7 +270,9 @@ def analyse_sample(folder: str | Path, *, save_format: SAVE_FORMATS = "parquet")
     summary["∆ASR / Ω cm²"]["Value"] = lsv_res["post"] - lsv_res["pre"]
     summary["F pre / mF"]["Value"] = cv_res["pre"]
     summary["F post / mF"]["Value"] = cv_res["post"]
-    summary["∆F / mF"]["Value"] = cv_res["post"] - cv_res["pre"]
+    summary["∆F / mF"]["Value"] = (
+        cv_res["post"] - cv_res["pre"] if (cv_res["post"] and cv_res["pre"]) else None
+    )
     summary["Assembled resistance / Ω"]["Value"] = get_res_from_filename(gcpl_files[0].stem)
     summary["EIS R pre / Ω"]["Value"] = eis_res.get("pre", {}).get("R0", {}).get("value")
     summary["EIS R pre / Ω"]["Error"] = eis_res.get("pre", {}).get("R0", {}).get("err")
