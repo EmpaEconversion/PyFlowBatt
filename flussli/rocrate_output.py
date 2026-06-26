@@ -32,6 +32,25 @@ ENCODING_FORMATS: dict[str, str] = {
 
 EIS_TAGS = ["eis_pre", "eis_pre-50%SOC", "eis_post-50%SOC", "eis_post"]
 
+OUTPUT_DESCRIPTIONS: dict[str, str] = {
+    "gcpl": "Galvanostatic cycling analysis",
+    "lsv_pre": "Pre-cycling linear sweep voltammetry analysis",
+    "lsv_post": "Post-cycling linear sweep voltammetry analysis",
+    "cv_pre": "Pre-cycling cyclic voltammetry analysis",
+    "cv_post": "Post-cycling cyclic voltammetry analysis",
+    "eis_pre": "EIS analysis, pre-cycling",
+    "eis_pre-50%SOC": "EIS analysis, pre-cycling 50% SOC",
+    "eis_post-50%SOC": "EIS analysis, post-cycling 50% SOC",
+    "eis_post": "EIS analysis, post-cycling",
+    "summary": "Per-sample analysis summary",
+    "metadata": "BattINFO JSON-LD metadata",
+}
+
+EXTRA_INPUT_DESCRIPTIONS: dict[str, str] = {
+    "protocol": "EC-Lab measurement protocol (.mps)",
+    "battinfo_xlsx": "BattINFO metadata input",
+}
+
 
 def _classify_inputs(sample_folder: Path) -> dict[str, list[Path]]:
     """Map measurement labels to their input MPR files for one sample folder."""
@@ -82,7 +101,8 @@ def _rel(path: Path, root: Path) -> str:
 def write_rocrate(
     root_folder: Path,
     sample_folders: list[Path],
-    save_format: str,
+    tracked_by_sample: dict[Path, dict[str, list[Path]]],
+    tracked_extras_by_sample: dict[Path, dict[str, list[Path]]] | None = None,
 ) -> None:
     """Write ro-crate-metadata.json at root_folder describing all inputs and outputs."""
     crate = ROCrate()
@@ -98,7 +118,7 @@ def write_rocrate(
         rel_sample = _rel(sample_folder, root_folder)
 
         sample_dataset = crate.add_dataset(
-            rel_sample + "/",
+            dest_path=rel_sample + "/",
             properties={
                 "name": sample_id,
                 "description": f"Electrochemical cell measurements: {sample_folder.name}",
@@ -108,15 +128,14 @@ def write_rocrate(
 
         inputs = _classify_inputs(sample_folder)
         input_entities: dict[str, list] = {}
-
         for label, mpr_paths in inputs.items():
             label_entities = []
             for mpr_path in mpr_paths:
                 if not mpr_path.exists():
                     continue
-                rel_mpr = _rel(mpr_path, root_folder)
                 mpr_entity = crate.add_file(
-                    rel_mpr,
+                    str(mpr_path),
+                    dest_path=_rel(mpr_path, root_folder),
                     properties={
                         "name": mpr_path.stem,
                         "encodingFormat": ENCODING_FORMATS[".mpr"],
@@ -127,55 +146,53 @@ def write_rocrate(
             if label_entities:
                 input_entities[label] = label_entities
 
-        all_input_entities = [e for entities in input_entities.values() for e in entities]
+        all_input_entities = [e for ents in input_entities.values() for e in ents]
+        for label, paths in tracked_by_sample.get(sample_folder, {}).items():
+            derived_from = input_entities.get(label) or all_input_entities
+            desc = OUTPUT_DESCRIPTIONS.get(label)
+            for path in paths:
+                if not path.exists():
+                    continue
+                ext = "".join(path.suffixes)
+                fmt = ENCODING_FORMATS.get(
+                    path.suffix, ENCODING_FORMATS.get(ext, "application/octet-stream")
+                )
+                props: dict = {
+                    "name": path.name,
+                    "encodingFormat": fmt,
+                    "derivedFrom": derived_from or None,
+                }
+                if desc:
+                    props["description"] = desc
+                crate.add_file(str(path), dest_path=_rel(path, root_folder), properties=props)
 
-        results_dir = sample_folder / "results"
-        if not results_dir.exists():
-            continue
-
-        for label, mpr_entities in input_entities.items():
-            data_ext = ".parquet" if save_format == "parquet" else ".csv"
-            data_path = results_dir / f"{label}.x.bdf{data_ext}"
-            if data_path.exists():
+        extras = tracked_extras_by_sample.get(sample_folder, {}) if tracked_extras_by_sample else {}
+        for label, paths in extras.items():
+            desc = EXTRA_INPUT_DESCRIPTIONS.get(label, label)
+            for path in paths:
+                if not path.exists():
+                    continue
                 crate.add_file(
-                    _rel(data_path, root_folder),
+                    str(path),
+                    dest_path=_rel(path, root_folder),
                     properties={
-                        "name": data_path.name,
-                        "encodingFormat": ENCODING_FORMATS[data_ext],
-                        "derivedFrom": mpr_entities,
+                        "name": path.name,
+                        "encodingFormat": ENCODING_FORMATS.get(
+                            path.suffix, "application/octet-stream"
+                        ),
+                        "description": desc,
                     },
                 )
-
-            plot_path = results_dir / f"{label}.png"
-            if plot_path.exists():
-                crate.add_file(
-                    _rel(plot_path, root_folder),
-                    properties={
-                        "name": plot_path.name,
-                        "encodingFormat": ENCODING_FORMATS[".png"],
-                        "derivedFrom": mpr_entities,
-                    },
-                )
-
-        summary_path = results_dir / "summary.xlsx"
-        if summary_path.exists():
-            crate.add_file(
-                _rel(summary_path, root_folder),
-                properties={
-                    "name": "summary.xlsx",
-                    "encodingFormat": ENCODING_FORMATS[".xlsx"],
-                    "derivedFrom": all_input_entities if all_input_entities else None,
-                },
-            )
 
     combined_summary = root_folder / "combined_results" / "combined_summary.xlsx"
     if combined_summary.exists():
         crate.add_file(
-            _rel(combined_summary, root_folder),
+            str(combined_summary),
+            dest_path=_rel(combined_summary, root_folder),
             properties={
                 "name": "combined_summary.xlsx",
                 "encodingFormat": ENCODING_FORMATS[".xlsx"],
-                "derivedFrom": all_sample_datasets if all_sample_datasets else None,
+                "derivedFrom": all_sample_datasets or None,
             },
         )
 

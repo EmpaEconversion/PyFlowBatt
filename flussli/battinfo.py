@@ -464,35 +464,98 @@ def add_ccid_output(
     }
 
 
+def add_input_data(
+    rel_file_path: str,
+    zenodo_doi_url: str | None,
+    comment: str | None = None,
+) -> dict:
+    """Add links to raw input files to the hasInput section of json-ld output.
+
+    Args:
+        rel_file_path: relative path to file, e.g. cell01_GCPL_01.mpr
+        zenodo_doi_url: optional Zenodo archive URL
+        comment: human-readable description of what this file is
+
+    Returns:
+        dict with "BatteryTest" as top level type.
+
+    """
+    ext = Path(rel_file_path).suffix.lower()
+    if ext in {".mpr", ".mps"}:
+        media_type = "application/octet-stream"
+    elif ext in {".xlsx", ".xls"}:
+        media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    elif ext == ".json":
+        media_type = "application/json"
+    else:
+        media_type = "application/octet-stream"
+
+    dist: dict = {
+        "@id": f"{zenodo_doi_url}#{rel_file_path}" if zenodo_doi_url else rel_file_path,
+        "@type": "dcat:Distribution",
+        "dcat:mediaType": media_type,
+    }
+    if comment:
+        dist["rdfs:comment"] = comment
+
+    return {
+        "@type": "BatteryTest",
+        "hasInput": {
+            "@type": ["RawData", "dcat:Dataset"],
+            "dcat:distribution": dist,
+        },
+    }
+
+
 def add_data(
     rel_file_path: str,
     zenodo_doi_url: str | None,
+    extras: dict | None = None,
 ) -> dict:
     """Add links to data files to output section of json-ld output.
 
     Args:
         rel_file_path: relative path to file, e.g. empa__ccid01345/empa__ccid01345.bdf.parquet
         zenodo_doi_url: path to zenodo archive e.g. https://doi.org/10.1234/zenodo.12345678
+        extras: dict with any extra terms to include in metadata
 
     Returns:
         dict with "BatteryTest" as top level type.
 
     """
+    extras = extras or {}
     if rel_file_path.endswith(".parquet"):
         additions: dict[str, str | list | dict] = {
             "dcat:mediaType": "application/vnd.apache.parquet",
             "csvw:tableSchema": "https://w3id.org/battery-data-alliance/ontology/battery-data-format/schema",
+            "rdfs:comment": "Time series electrochemical data using Battery Data Format (bdf) columns",
         }
     elif rel_file_path.endswith(".csv"):
         additions = {
             "dcat:mediaType": "text/csv",
             "csvw:tableSchema": "https://w3id.org/battery-data-alliance/ontology/battery-data-format/schema",
             "csvw:dialect": {"@type": "csvw:Dialect", "csvw:delimiter": ",", "csvw:skipRows": 0},
+            "rdfs:comment": "Time series electrochemical data using Battery Data Format (bdf) columns",
         }
     elif rel_file_path.endswith(".json"):
         additions = {
             "dcat:mediaType": "application/json",
         }
+    elif rel_file_path.endswith(".png"):
+        additions = {
+            "dcat:mediaType": "image/png",
+        }
+    elif rel_file_path.endswith(".xlsx"):
+        additions = {
+            "dcat:mediaType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "rdfs:comment": "Excel sheets with summary information from sample analysis",
+        }
+    elif rel_file_path.endswith(".mpr"):
+        additions = {
+            "rdfs:comment": "Raw electrochemical data in proprietary Biologic .mpr binary format"
+        }
+    elif rel_file_path.endswith(".mps"):
+        additions = {"rdfs:comment": "Cycling protocol in text-based Biologic .mps format"}
     else:
         msg = f"Unknown file type: {rel_file_path}"
         raise ValueError(msg)
@@ -504,6 +567,7 @@ def add_data(
                 "@id": f"{zenodo_doi_url}#{rel_file_path}" if zenodo_doi_url else rel_file_path,
                 "@type": "dcat:Distribution",
                 **additions,
+                **extras,
             }
         },
     }
