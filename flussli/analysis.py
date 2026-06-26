@@ -1,5 +1,7 @@
 """Utility functions for analysing flow battery data from MPR files."""
 
+import contextlib
+import json
 import logging
 import re
 from pathlib import Path
@@ -8,8 +10,9 @@ from typing import Literal
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from battinfoconverter_backend import convert_excel_to_jsonld
 
-from flussli import cv, eis, gcpl, lsv, ocv
+from flussli import battinfo, cv, eis, gcpl, lsv, ocv
 from flussli.read import read_to_bdf
 
 logger = logging.getLogger(__name__)
@@ -17,6 +20,19 @@ logger = logging.getLogger(__name__)
 SAVE_FORMATS = Literal["parquet", "csv"] | None
 DEFAULT_DEPTH = 6  # Default max search depth in folders
 DEFAULT_SEARCH = 10000  # Default max number of folders searched
+
+MPR_DESCRIPTIONS: dict[str, str] = {
+    "gcpl": "Galvanostatic cycling measurement (EC-Lab MPR)",
+    "ocv": "Open circuit voltage measurement (EC-Lab MPR)",
+    "lsv_pre": "Pre-cycling linear sweep voltammetry (EC-Lab MPR)",
+    "lsv_post": "Post-cycling linear sweep voltammetry (EC-Lab MPR)",
+    "cv_pre": "Pre-cycling cyclic voltammetry (EC-Lab MPR)",
+    "cv_post": "Post-cycling cyclic voltammetry (EC-Lab MPR)",
+    "eis_pre": "EIS measurement, pre-cycling (EC-Lab MPR)",
+    "eis_pre-50%SOC": "EIS measurement, pre-cycling 50% SOC (EC-Lab MPR)",
+    "eis_post-50%SOC": "EIS measurement, post-cycling 50% SOC (EC-Lab MPR)",
+    "eis_post": "EIS measurement, post-cycling (EC-Lab MPR)",
+}
 
 
 def get_res_from_filename(s: str) -> float:
@@ -72,9 +88,12 @@ def df_save_bdf(df: pd.DataFrame, filepath: Path, save_format: SAVE_FORMATS = "p
     raise ValueError(msg)
 
 
-def analyse_sample(folder: str | Path, *, save_format: SAVE_FORMATS = "parquet") -> None:
+def analyse_sample(
+    folder: str | Path, *, pub_info: dict | None = None, save_format: SAVE_FORMATS = "parquet"
+) -> tuple[dict[str, list[Path]], dict[str, list[Path]]]:
     """Read all the files in a folder, analayse and plot everything."""
     folder = Path(folder)
+    pub_info = pub_info or {}
 
     logger.info("\n🌊 Flussli-ing %s", folder.name)
     gcpl_files = list(folder.glob("*_GCPL_*.mpr"))
@@ -84,18 +103,74 @@ def analyse_sample(folder: str | Path, *, save_format: SAVE_FORMATS = "parquet")
     cv_files_before = list(folder.glob("*_CVApre*.mpr")) + list(folder.glob("*_CVpre*.mpr"))
     cv_files_after = list(folder.glob("*_CVApost*.mpr")) + list(folder.glob("*_CVpost*.mpr"))
     eis_files = list(folder.glob("*_PEIS_*.mpr"))
+    mps_files = list(folder.glob("*.mps"))
+    battinfo_files = list(folder.glob("*.xlsx"))
     logger.debug("Reading GCPL: %s", ", ".join([f.stem for f in gcpl_files]))
     logger.debug("Reading LSV: %s", ", ".join([f.stem for f in lsv_files]))
     logger.debug("Reading CV before: %s", ", ".join([f.stem for f in cv_files_before]))
     logger.debug("Reading CV after:  %s", ", ".join([f.stem for f in cv_files_after]))
     logger.debug("Reading EIS files: %s", ", ".join([f.stem for f in eis_files]))
+    logger.debug("Checking BattINFO files: %s", ", ".join([f.stem for f in battinfo_files]))
 
     cycle_df = None
     cv_df = None
     lsv_df = None
     ratetest_df = None
     eis_df = None
-    (folder / "results").mkdir(exist_ok=True)
+    results_dir = folder / "results"
+    results_dir.mkdir(exist_ok=True)
+    tracked_outputs: dict[str, list[Path]] = {}
+    tracked_mpr_inputs: dict[str, list[Path]] = {}
+    battinfo_xlsx_path: Path | None = None
+    # suffix produced by df_save_bdf for the configured format
+    bdf_suffix = (
+        ".bdf.parquet"
+        if save_format == "parquet"
+        else (".csv.parquet" if save_format == "csv" else None)
+    )
+
+    logger.info("Battinfo-ifying")
+    battinfo_json = None
+    battinfo_sample_id = None
+    if not battinfo_files:
+        logger.info("- ☹️ No battinfo xlsx found, skipping")
+    else:
+        for file in battinfo_files:
+            raw_json = None
+            with contextlib.suppress(ValueError):
+                raw_json = convert_excel_to_jsonld(file)
+            if raw_json is None:
+                continue
+            battinfo_xlsx_path = file
+            fcid = raw_json["schema:productID"]
+            battinfo_sample_id = raw_json["schema:name"]
+            battinfo_json = battinfo.make_test_object(raw_json)
+            if pub_info and pub_info.get("citation_string"):
+                battinfo_json = battinfo.merge_jsonld_on_type(
+                    [battinfo_json, battinfo.add_citation(pub_info["citation_string"])]
+                )
+            if pub_info and pub_info.get("authors") and pub_info.get("institutions"):
+                battinfo_json = battinfo.merge_jsonld_on_type(
+                    [
+                        battinfo_json,
+                        battinfo.add_authors(pub_info["authors"], pub_info["institutions"]),
+                    ]
+                )
+            if pub_info and pub_info.get("sample_to_fig"):
+                battinfo_json = battinfo.merge_jsonld_on_type(
+                    [
+                        battinfo_json,
+                        battinfo.add_associated_media(
+                            pub_info.get("publication_doi_url"),
+                            pub_info["sample_to_fig"],
+                            fcid,
+                            battinfo_sample_id,
+                        ),
+                    ]
+                )
+            break
+        else:
+            logger.info("- ☹️ Couldn't convert battinfo xlsx")
 
     logger.info("⛓️‍💥 Analysing OCV")
     if len(ocv_files) == 0:
@@ -106,6 +181,7 @@ def analyse_sample(folder: str | Path, *, save_format: SAVE_FORMATS = "parquet")
             logger.warning("- More than one OCV file, only reading %s", ocv_files[0].stem)
         try:
             av_ocv = ocv.analyse(ocv_files[0])
+            tracked_mpr_inputs["ocv"] = [ocv_files[0]]
         except ValueError:
             logger.exception("Failed to analyse OCV")
 
@@ -115,10 +191,14 @@ def analyse_sample(folder: str | Path, *, save_format: SAVE_FORMATS = "parquet")
     else:
         df, cycle_df = gcpl.analyse([gcpl_file])
         fig, _ax = gcpl.plot(df)
-        fig.savefig(folder / "results" / "gcpl.png")
+        fig.savefig(results_dir / "gcpl.png")
         plt.close(fig)
         ratetest_df = gcpl.cycles_to_ratetest(cycle_df)
-        df_save_bdf(df, folder / "results" / "gcpl.x", save_format=save_format)
+        df_save_bdf(df, results_dir / "gcpl.x", save_format=save_format)
+        tracked_outputs["gcpl"] = [results_dir / "gcpl.png"]
+        if bdf_suffix:
+            tracked_outputs["gcpl"].append((results_dir / "gcpl.x").with_suffix(bdf_suffix))
+        tracked_mpr_inputs["gcpl"] = [gcpl_file]
 
     logger.info("↗️ Analysing LSV")
     lsv_res = {"pre": np.nan, "post": np.nan}
@@ -143,11 +223,16 @@ def analyse_sample(folder: str | Path, *, save_format: SAVE_FORMATS = "parquet")
             try:
                 df, results = lsv.analyse(lsv_files[0])
                 fig, _ax = lsv.plot(df, results)
-                fig.savefig(folder / "results" / f"lsv_{p}.png")
+                fig.savefig(results_dir / f"lsv_{p}.png")
                 plt.close(fig)
-                df_save_bdf(df, folder / "results" / "lsv_{p}.x", save_format=save_format)
+                df_save_bdf(df, results_dir / f"lsv_{p}.x", save_format=save_format)
                 lsv_res[p] = float(results["Area specific resistance / Ω cm²"])
-
+                tracked_outputs[f"lsv_{p}"] = [results_dir / f"lsv_{p}.png"]
+                if bdf_suffix:
+                    tracked_outputs[f"lsv_{p}"].append(
+                        (results_dir / f"lsv_{p}.x").with_suffix(bdf_suffix)
+                    )
+                tracked_mpr_inputs[f"lsv_{p}"] = [lsv_files[0]]
                 results = {"Pre or post cycle": p, **results}
                 lsv_df = pd.DataFrame([results])
             except ValueError:
@@ -155,18 +240,30 @@ def analyse_sample(folder: str | Path, *, save_format: SAVE_FORMATS = "parquet")
         else:
             try:
                 df, results_pre = lsv.analyse(lsv_files[0])
-                df_save_bdf(df, folder / "results" / "lsv_pre.x", save_format=save_format)
+                df_save_bdf(df, results_dir / "lsv_pre.x", save_format=save_format)
                 fig, _ax = lsv.plot(df, results_pre)
-                fig.savefig(folder / "results" / "lsv_pre.png")
+                fig.savefig(results_dir / "lsv_pre.png")
                 plt.close(fig)
                 lsv_res["pre"] = float(results_pre["Area specific resistance / Ω cm²"])
+                tracked_outputs["lsv_pre"] = [results_dir / "lsv_pre.png"]
+                if bdf_suffix:
+                    tracked_outputs["lsv_pre"].append(
+                        (results_dir / "lsv_pre.x").with_suffix(bdf_suffix)
+                    )
+                tracked_mpr_inputs["lsv_pre"] = [lsv_files[0]]
 
                 df, results_post = lsv.analyse(lsv_files[-1])
-                df_save_bdf(df, folder / "results" / "lsv_post.x", save_format=save_format)
+                df_save_bdf(df, results_dir / "lsv_post.x", save_format=save_format)
                 fig, _ax = lsv.plot(df, results_post)
-                fig.savefig(folder / "results" / "lsv_post.png")
+                fig.savefig(results_dir / "lsv_post.png")
                 plt.close(fig)
                 lsv_res["post"] = float(results_post["Area specific resistance / Ω cm²"])
+                tracked_outputs["lsv_post"] = [results_dir / "lsv_post.png"]
+                if bdf_suffix:
+                    tracked_outputs["lsv_post"].append(
+                        (results_dir / "lsv_post.x").with_suffix(bdf_suffix)
+                    )
+                tracked_mpr_inputs["lsv_post"] = [lsv_files[-1]]
 
                 lsv_df = pd.DataFrame(
                     [
@@ -188,11 +285,17 @@ def analyse_sample(folder: str | Path, *, save_format: SAVE_FORMATS = "parquet")
             if len(cv_files) > 1:
                 logger.warning("More than one CV file, only reading %s", cv_files[0].stem)
             df, cv_df, capacitance_mF = cv.analyse(cv_files[0])
-            df_save_bdf(df, folder / "results" / f"cv_{p}.x", save_format=save_format)
+            df_save_bdf(df, results_dir / f"cv_{p}.x", save_format=save_format)
             fig, _ax = cv.plot(df, cv_df)
-            fig.savefig(folder / "results" / f"cv_{p}.png")
+            fig.savefig(results_dir / f"cv_{p}.png")
             plt.close(fig)
             cv_res[p] = capacitance_mF
+            tracked_outputs[f"cv_{p}"] = [results_dir / f"cv_{p}.png"]
+            if bdf_suffix:
+                tracked_outputs[f"cv_{p}"].append(
+                    (results_dir / f"cv_{p}.x").with_suffix(bdf_suffix)
+                )
+            tracked_mpr_inputs[f"cv_{p}"] = [cv_files[0]]
 
     logger.info("🌈 Analysing PEIS")
     eis_res = {}
@@ -207,12 +310,18 @@ def analyse_sample(folder: str | Path, *, save_format: SAVE_FORMATS = "parquet")
                 df = read_to_bdf(f)
                 params, Z_fit = eis.analyse(df)
                 fig, _ax = eis.plot(df, Z_fit)
-                fig.savefig(folder / "results" / f"eis_{tag}.png")
+                fig.savefig(results_dir / f"eis_{tag}.png")
                 plt.close(fig)
                 eis_res[tag] = params
                 df["Real Impedance Fit / ohm"] = np.real(Z_fit)
                 df["Real Impedance Fit / ohm"] = np.imag(Z_fit)
-                df_save_bdf(df, folder / "results" / f"eis_{tag}.x", save_format=save_format)
+                df_save_bdf(df, results_dir / f"eis_{tag}.x", save_format=save_format)
+                tracked_outputs[f"eis_{tag}"] = [results_dir / f"eis_{tag}.png"]
+                if bdf_suffix:
+                    tracked_outputs[f"eis_{tag}"].append(
+                        (results_dir / f"eis_{tag}.x").with_suffix(bdf_suffix)
+                    )
+                tracked_mpr_inputs[f"eis_{tag}"] = [Path(eis_file)]
                 for name, values in params.items():
                     rows.append({"file": f.stem, "tag": tag, "name": name, **values})
             except Exception as e:
@@ -362,6 +471,48 @@ def analyse_sample(folder: str | Path, *, save_format: SAVE_FORMATS = "parquet")
         worksheet.autofit()
 
     workbook.close()
+    tracked_outputs["summary"] = [results_dir / "summary.xlsx"]
+
+    tracked_extra_inputs: dict[str, list[Path]] = {}
+    if mps_files:
+        tracked_extra_inputs["protocol"] = mps_files
+    if battinfo_xlsx_path:
+        tracked_extra_inputs["battinfo_xlsx"] = [battinfo_xlsx_path]
+
+    if battinfo_json is not None:
+        zenodo_url = pub_info.get("zenodo_doi_url") if pub_info else None
+        for label, paths in tracked_mpr_inputs.items():
+            for path in paths:
+                snippet = battinfo.add_input_data(
+                    path.relative_to(folder).as_posix(), zenodo_url, MPR_DESCRIPTIONS.get(label)
+                )
+                battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
+        for path in mps_files:
+            snippet = battinfo.add_input_data(
+                path.relative_to(folder).as_posix(),
+                zenodo_url,
+                "EC-Lab measurement protocol (.mps)",
+            )
+            battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
+        if battinfo_xlsx_path:
+            snippet = battinfo.add_input_data(
+                battinfo_xlsx_path.relative_to(folder).as_posix(),
+                zenodo_url,
+                "BattINFO converter Excel metadata input",
+            )
+            battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
+        for label_paths in tracked_outputs.values():
+            for path in label_paths:
+                rel = path.relative_to(folder).as_posix()
+                with contextlib.suppress(ValueError):
+                    snippet = battinfo.add_data(rel, zenodo_url)
+                    battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
+        metadata_path = folder / f"metadata.{battinfo_sample_id}.json"
+        with metadata_path.open("w") as mf:
+            json.dump(battinfo_json, mf, indent=4)
+        tracked_outputs["metadata"] = [metadata_path]
+
+    return tracked_outputs, tracked_extra_inputs
 
 
 def is_sample_folder(folderpath: str | Path) -> bool:
@@ -472,29 +623,38 @@ def analyse_all_samples(
 ) -> None:
     """Take a folder and run all analysis."""
     folder = Path(folder).resolve()
+    pub_info = pub_info_from_root(folder)
     samples = find_all_sample_folders(folder, max_search_depth, max_folder_searches)
     if len(samples) == 0:
         logger.error("No sample folders found in %s", folder)
         return
+    tracked_by_sample: dict[Path, dict[str, list[Path]]] = {}
+    tracked_extras_by_sample: dict[Path, dict[str, list[Path]]] = {}
     if len(samples) == 1:
-        analyse_sample(samples[0], save_format=save_format)
+        tracked_by_sample[samples[0]], tracked_extras_by_sample[samples[0]] = analyse_sample(
+            samples[0], save_format=save_format, pub_info=pub_info
+        )
     else:
         logger.info("Found %d sample folders:", len(samples))
         for s in samples:
-            analyse_sample(s, save_format=save_format)
+            tracked_by_sample[s], tracked_extras_by_sample[s] = analyse_sample(
+                s, save_format=save_format, pub_info=pub_info
+            )
 
         summaries = find_all_sample_summaries(folder, max_search_depth, max_folder_searches)
         df = merge_summaries(summaries)
-        (folder / "combined_results").mkdir(exist_ok=True)
-        writer = pd.ExcelWriter(
-            folder / "combined_results" / "combined_summary.xlsx", engine="xlsxwriter"
-        )
+        writer = pd.ExcelWriter(folder / "combined_summary.xlsx", engine="xlsxwriter")
         df.to_excel(writer, index=False, sheet_name="Summary")
         workbook = writer.book
         worksheet = writer.sheets["Summary"]
         worksheet.autofit()
         workbook.close()
         logger.info("\n🎉 Combined all the results into one big summary")
+
+    from flussli.rocrate_output import write_rocrate  # noqa: PLC0415
+
+    write_rocrate(folder, samples, tracked_by_sample, tracked_extras_by_sample)
+    logger.info("📦 Written RO-Crate metadata to %s", folder / "ro-crate-metadata.json")
 
 
 def dry_analyse_all_samples(
@@ -521,3 +681,12 @@ def dry_analyse_all_samples(
             "Then I would combine all the summaries into one 'combined_results' subfolder inside %s.",
             folder,
         )
+
+
+def pub_info_from_root(folder: Path) -> dict:
+    """Get publication info from xlsx in root folder."""
+    candidate_files = folder.glob("*.xlsx")
+    for file in candidate_files:
+        with contextlib.suppress(Exception):
+            return battinfo.parse_zenodo_info_xlsx(file)
+    return {}
