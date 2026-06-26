@@ -643,10 +643,7 @@ def analyse_all_samples(
 
         summaries = find_all_sample_summaries(folder, max_search_depth, max_folder_searches)
         df = merge_summaries(summaries)
-        (folder / "combined_results").mkdir(exist_ok=True)
-        writer = pd.ExcelWriter(
-            folder / "combined_results" / "combined_summary.xlsx", engine="xlsxwriter"
-        )
+        writer = pd.ExcelWriter(folder / "combined_summary.xlsx", engine="xlsxwriter")
         df.to_excel(writer, index=False, sheet_name="Summary")
         workbook = writer.book
         worksheet = writer.sheets["Summary"]
