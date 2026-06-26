@@ -498,7 +498,7 @@ def analyse_sample(
             snippet = battinfo.add_input_data(
                 battinfo_xlsx_path.relative_to(folder).as_posix(),
                 zenodo_url,
-                "BattINFO metadata input",
+                "BattINFO converter Excel metadata input",
             )
             battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
         for label_paths in tracked_outputs.values():

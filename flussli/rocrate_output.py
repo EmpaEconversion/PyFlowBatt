@@ -147,8 +147,36 @@ def write_rocrate(
                 input_entities[label] = label_entities
 
         all_input_entities = [e for ents in input_entities.values() for e in ents]
+
+        extras = tracked_extras_by_sample.get(sample_folder, {}) if tracked_extras_by_sample else {}
+        extra_entities: dict[str, list] = {}
+        for label, paths in extras.items():
+            desc = EXTRA_INPUT_DESCRIPTIONS.get(label, label)
+            label_extra_ents = []
+            for path in paths:
+                if not path.exists():
+                    continue
+                label_extra_ents.append(
+                    crate.add_file(
+                        str(path),
+                        dest_path=_rel(path, root_folder),
+                        properties={
+                            "name": path.name,
+                            "encodingFormat": ENCODING_FORMATS.get(
+                                path.suffix, "application/octet-stream"
+                            ),
+                            "description": desc,
+                        },
+                    )
+                )
+            if label_extra_ents:
+                extra_entities[label] = label_extra_ents
+
         for label, paths in tracked_by_sample.get(sample_folder, {}).items():
-            derived_from = input_entities.get(label) or all_input_entities
+            if label == "metadata":
+                derived_from = extra_entities.get("battinfo_xlsx") or None
+            else:
+                derived_from = input_entities.get(label) or all_input_entities or None
             desc = OUTPUT_DESCRIPTIONS.get(label)
             for path in paths:
                 if not path.exists():
@@ -160,29 +188,11 @@ def write_rocrate(
                 props: dict = {
                     "name": path.name,
                     "encodingFormat": fmt,
-                    "derivedFrom": derived_from or None,
+                    "derivedFrom": derived_from,
                 }
                 if desc:
                     props["description"] = desc
                 crate.add_file(str(path), dest_path=_rel(path, root_folder), properties=props)
-
-        extras = tracked_extras_by_sample.get(sample_folder, {}) if tracked_extras_by_sample else {}
-        for label, paths in extras.items():
-            desc = EXTRA_INPUT_DESCRIPTIONS.get(label, label)
-            for path in paths:
-                if not path.exists():
-                    continue
-                crate.add_file(
-                    str(path),
-                    dest_path=_rel(path, root_folder),
-                    properties={
-                        "name": path.name,
-                        "encodingFormat": ENCODING_FORMATS.get(
-                            path.suffix, "application/octet-stream"
-                        ),
-                        "description": desc,
-                    },
-                )
 
     combined_summary = root_folder / "combined_results" / "combined_summary.xlsx"
     if combined_summary.exists():
