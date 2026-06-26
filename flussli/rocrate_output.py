@@ -110,6 +110,7 @@ def write_rocrate(
     crate.root_dataset["description"] = (
         f"Flow battery electrochemical analysis produced by flussli for {root_folder.name}"
     )
+    crate.root_dataset["license"] = {"@id": "https://creativecommons.org/licenses/by/4.0/"}
 
     all_sample_datasets = []
 
@@ -125,6 +126,7 @@ def write_rocrate(
             },
         )
         all_sample_datasets.append(sample_dataset)
+        sample_file_entities = []
 
         inputs = _classify_inputs(sample_folder)
         input_entities: dict[str, list] = {}
@@ -139,10 +141,11 @@ def write_rocrate(
                     properties={
                         "name": mpr_path.stem,
                         "encodingFormat": ENCODING_FORMATS[".mpr"],
-                        "measurementType": MEASUREMENT_LABELS.get(label, label),
+                        "measurementTechnique": MEASUREMENT_LABELS.get(label, label),
                     },
                 )
                 label_entities.append(mpr_entity)
+                sample_file_entities.append(mpr_entity)
             if label_entities:
                 input_entities[label] = label_entities
 
@@ -156,19 +159,19 @@ def write_rocrate(
             for path in paths:
                 if not path.exists():
                     continue
-                label_extra_ents.append(
-                    crate.add_file(
-                        str(path),
-                        dest_path=_rel(path, root_folder),
-                        properties={
-                            "name": path.name,
-                            "encodingFormat": ENCODING_FORMATS.get(
-                                path.suffix, "application/octet-stream"
-                            ),
-                            "description": desc,
-                        },
-                    )
+                ent = crate.add_file(
+                    str(path),
+                    dest_path=_rel(path, root_folder),
+                    properties={
+                        "name": path.name,
+                        "encodingFormat": ENCODING_FORMATS.get(
+                            path.suffix, "application/octet-stream"
+                        ),
+                        "description": desc,
+                    },
                 )
+                label_extra_ents.append(ent)
+                sample_file_entities.append(ent)
             if label_extra_ents:
                 extra_entities[label] = label_extra_ents
 
@@ -188,21 +191,27 @@ def write_rocrate(
                 props: dict = {
                     "name": path.name,
                     "encodingFormat": fmt,
-                    "derivedFrom": derived_from,
+                    "wasDerivedFrom": derived_from,
                 }
                 if desc:
                     props["description"] = desc
-                crate.add_file(str(path), dest_path=_rel(path, root_folder), properties=props)
+                output_ent = crate.add_file(
+                    str(path), dest_path=_rel(path, root_folder), properties=props
+                )
+                sample_file_entities.append(output_ent)
 
-    combined_summary = root_folder / "combined_results" / "combined_summary.xlsx"
+        sample_dataset["hasPart"] = sample_file_entities  # type: ignore[index]
+
+    combined_summary = root_folder / "combined_summary.xlsx"
     if combined_summary.exists():
         crate.add_file(
             str(combined_summary),
-            dest_path=_rel(combined_summary, root_folder),
+            dest_path="combined_summary.xlsx",
             properties={
                 "name": "combined_summary.xlsx",
                 "encodingFormat": ENCODING_FORMATS[".xlsx"],
-                "derivedFrom": all_sample_datasets or None,
+                "wasDerivedFrom": all_sample_datasets or None,
+                "description": "Combined per-sample summary across all cells",
             },
         )
 
