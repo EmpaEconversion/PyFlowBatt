@@ -730,27 +730,35 @@ def parse_zenodo_info_xlsx(
             return x
         return None if pd.isna(x) else x
 
+    def strip_if_str(x: object) -> object:
+        if isinstance(x, str):
+            return x.strip()
+        return x
+
     # Read General sheet
     general_df = pd.read_excel(excel_file, sheet_name="General", engine="openpyxl", header=None)
     keys = general_df[0].to_numpy()
-    keys = [k.lower().replace(" ", "_") for k in keys]
-    values = [nan_to_none(v) for v in general_df[1].to_numpy()]
+    keys = [k.strip().lower().replace(" ", "_") for k in keys]
+    values = [strip_if_str(nan_to_none(v)) for v in general_df[1].to_numpy()]
     general_dict = dict(zip(keys, values, strict=True))
 
     # Read Figures sheet
     figures_df = pd.read_excel(excel_file, sheet_name="Figures", engine="openpyxl")
     figures_dict = {}
     for _, row in figures_df.iterrows():
-        key = row["Barcode"] if pd.notna(row["Barcode"]) else row["Sample ID"]
+        key = strip_if_str(row["Barcode"] if pd.notna(row["Barcode"]) else row["Sample ID"])
         figures = row.drop(labels=["Sample ID", "Barcode"]).dropna().astype(str).tolist()
+        figures = [f.strip() for f in figures]
         figures_dict[key] = figures
 
     # Read Institutions sheet
     institutions_df = pd.read_excel(excel_file, sheet_name="Institutions", engine="openpyxl")
-    institutions_df.columns = [col.lower().replace(" ", "_") for col in institutions_df.columns]
+    institutions_df.columns = [
+        col.strip().lower().replace(" ", "_") for col in institutions_df.columns
+    ]
     institutions_dict = institutions_df.set_index("name").to_dict(orient="index")
     institutions_dict = {
-        name: {k: nan_to_none(v) for k, v in attrs.items()}
+        strip_if_str(name): {k: strip_if_str(nan_to_none(v)) for k, v in attrs.items()}
         for name, attrs in institutions_dict.items()
     }
 
@@ -759,10 +767,11 @@ def parse_zenodo_info_xlsx(
     authors_list = []
     for _, row in authors_df.iterrows():
         affil_list = row.drop(labels=["ORCID", "Name"]).dropna().astype(str).tolist()
+        affil_list = [f.strip() for f in affil_list]
         authors_list.append(
             {
-                "name": nan_to_none(row["Name"]),
-                "orcid": nan_to_none(row["ORCID"]),
+                "name": strip_if_str(nan_to_none(row["Name"])),
+                "orcid": strip_if_str(nan_to_none(row["ORCID"])),
                 "affiliation": affil_list,
             }
         )
