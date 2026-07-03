@@ -90,10 +90,11 @@ def df_save_bdf(df: pd.DataFrame, filepath: Path, save_format: SAVE_FORMATS = "p
 
 def analyse_sample(
     folder: str | Path, *, pub_info: dict | None = None, save_format: SAVE_FORMATS = "parquet"
-) -> tuple[dict[str, list[Path]], dict[str, list[Path]]]:
+) -> tuple[dict[str, list[Path]], dict[str, list[Path]], str | None]:
     """Read all the files in a folder, analayse and plot everything."""
     folder = Path(folder)
     pub_info = pub_info or {}
+    fcid: str | None = None
 
     logger.info("\n🌊 PyFlowBatt-ing %s", folder.name)
     gcpl_files = list(folder.glob("*_GCPL_*.mpr"))
@@ -512,7 +513,7 @@ def analyse_sample(
             json.dump(battinfo_json, mf, indent=4)
         tracked_outputs["metadata"] = [metadata_path]
 
-    return tracked_outputs, tracked_extra_inputs
+    return tracked_outputs, tracked_extra_inputs, fcid
 
 
 def is_sample_folder(folderpath: str | Path) -> bool:
@@ -630,14 +631,17 @@ def analyse_all_samples(
         return
     tracked_by_sample: dict[Path, dict[str, list[Path]]] = {}
     tracked_extras_by_sample: dict[Path, dict[str, list[Path]]] = {}
+    fcids_by_sample: dict[Path, str | None] = {}
     if len(samples) == 1:
-        tracked_by_sample[samples[0]], tracked_extras_by_sample[samples[0]] = analyse_sample(
-            samples[0], save_format=save_format, pub_info=pub_info
-        )
+        (
+            tracked_by_sample[samples[0]],
+            tracked_extras_by_sample[samples[0]],
+            fcids_by_sample[samples[0]],
+        ) = analyse_sample(samples[0], save_format=save_format, pub_info=pub_info)
     else:
         logger.info("Found %d sample folders:", len(samples))
         for s in samples:
-            tracked_by_sample[s], tracked_extras_by_sample[s] = analyse_sample(
+            tracked_by_sample[s], tracked_extras_by_sample[s], fcids_by_sample[s] = analyse_sample(
                 s, save_format=save_format, pub_info=pub_info
             )
 
@@ -653,7 +657,7 @@ def analyse_all_samples(
 
     from PyFlowBatt.rocrate_output import write_rocrate  # noqa: PLC0415
 
-    write_rocrate(folder, samples, tracked_by_sample, tracked_extras_by_sample)
+    write_rocrate(folder, samples, tracked_by_sample, tracked_extras_by_sample, fcids_by_sample)
     logger.info("📦 Written RO-Crate metadata to %s", folder / "ro-crate-metadata.json")
 
 
