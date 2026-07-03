@@ -13,6 +13,7 @@ import pandas as pd
 from battinfoconverter_backend import convert_excel_to_jsonld
 
 from PyFlowBatt import battinfo, cv, eis, gcpl, lsv, ocv
+from PyFlowBatt.config import EIS_TAGS, PyFlowBattConfig, classify_technique_files
 from PyFlowBatt.read import read_to_bdf
 
 logger = logging.getLogger(__name__)
@@ -54,13 +55,22 @@ def get_res_from_filename(s: str) -> float:
     return np.nan
 
 
-def get_sampleid_from_folderpath(folderpath: str | Path) -> str:
+def get_sampleid_from_folderpath(
+    folderpath: str | Path,
+    config: PyFlowBattConfig | None = None,
+) -> str:
     """Get the sample ID given a folder to a sample.
 
     Usually it is just the folder name, sometimes the parent.
+    Pass a ``PyFlowBattConfig`` to use a custom pattern or an explicit name.
     """
     folderpath = Path(folderpath)
-    pattern = r"^\d+_.+_.+$"
+    config = config or PyFlowBattConfig.load(folderpath)
+
+    if config.sample_id is not None:
+        return config.sample_id
+
+    pattern = config.sample_id_pattern
     # Sample ID has format [digits]_[somethingelse]_[somethingelse]
     # e.g. 250115_reda_1M-blahblahblah
     if re.match(pattern=pattern, string=folderpath.stem):
@@ -89,28 +99,43 @@ def df_save_bdf(df: pd.DataFrame, filepath: Path, save_format: SAVE_FORMATS = "p
 
 
 def analyse_sample(
-    folder: str | Path, *, pub_info: dict | None = None, save_format: SAVE_FORMATS = "parquet"
+    folder: str | Path,
+    *,
+    pub_info: dict | None = None,
+    save_format: SAVE_FORMATS = "parquet",
+    config: PyFlowBattConfig | None = None,
 ) -> tuple[dict[str, list[Path]], dict[str, list[Path]], str | None]:
-    """Read all the files in a folder, analayse and plot everything."""
+    """Read all the files in a folder, analayse and plot everything.
+
+    Without an explicit config, loads a ``pyflowbatt.toml`` cascade (home directory,
+    parent folder, sample folder) to customise technique glob patterns and sample ID
+    detection.
+    """
     folder = Path(folder)
     pub_info = pub_info or {}
     fcid: str | None = None
+    config = config or PyFlowBattConfig.load(folder)
 
     logger.info("\n🌊 PyFlowBatt-ing %s", folder.name)
-    gcpl_files = list(folder.glob("*_GCPL_*.mpr"))
-    gcpl_file = max(gcpl_files, key=lambda x: x.stat().st_size) if gcpl_files else None
-    ocv_files = list(folder.glob("*_OCV_*.mpr"))
-    lsv_files = list(folder.glob("*_LSV_*.mpr"))
-    cv_files_before = list(folder.glob("*_CVApre*.mpr")) + list(folder.glob("*_CVpre*.mpr"))
-    cv_files_after = list(folder.glob("*_CVApost*.mpr")) + list(folder.glob("*_CVpost*.mpr"))
-    eis_files = list(folder.glob("*_PEIS_*.mpr"))
+    classified = classify_technique_files(folder, config, warn=True)
+    gcpl_files = classified.get("gcpl", [])
+    gcpl_file = gcpl_files[0] if gcpl_files else None
+    ocv_files = classified.get("ocv", [])
+    cv_files_before = classified.get("cv_pre", [])
+    cv_files_after = classified.get("cv_post", [])
+    eis_by_tag = {
+        tag: classified[f"eis_{tag}"][0] for tag in EIS_TAGS if f"eis_{tag}" in classified
+    }
     mps_files = list(folder.glob("*.mps"))
     battinfo_files = list(folder.glob("*.xlsx"))
     logger.debug("Reading GCPL: %s", ", ".join([f.stem for f in gcpl_files]))
-    logger.debug("Reading LSV: %s", ", ".join([f.stem for f in lsv_files]))
+    logger.debug(
+        "Reading LSV: %s",
+        ", ".join(f.stem for label in ("lsv_pre", "lsv_post") for f in classified.get(label, [])),
+    )
     logger.debug("Reading CV before: %s", ", ".join([f.stem for f in cv_files_before]))
     logger.debug("Reading CV after:  %s", ", ".join([f.stem for f in cv_files_after]))
-    logger.debug("Reading EIS files: %s", ", ".join([f.stem for f in eis_files]))
+    logger.debug("Reading EIS files: %s", ", ".join([f.stem for f in eis_by_tag.values()]))
     logger.debug("Checking BattINFO files: %s", ", ".join([f.stem for f in battinfo_files]))
 
     cycle_df = None
@@ -178,8 +203,6 @@ def analyse_sample(
         logger.info("- ☹️ No OCV found, skipping")
         av_ocv = (np.nan, np.nan)
     else:
-        if len(ocv_files) > 1:
-            logger.warning("- More than one OCV file, only reading %s", ocv_files[0].stem)
         try:
             av_ocv = ocv.analyse(ocv_files[0])
             tracked_mpr_inputs["ocv"] = [ocv_files[0]]
@@ -203,26 +226,20 @@ def analyse_sample(
 
     logger.info("↗️ Analysing LSV")
     lsv_res = {"pre": np.nan, "post": np.nan}
-    if len(lsv_files) == 0:
+    lsv_pre_files = classified.get("lsv_pre", [])
+    lsv_post_files = classified.get("lsv_post", [])
+    if not lsv_pre_files and not lsv_post_files:
         logger.info("- ☹️ No LSV files found, skipping")
     else:
-        # Assume that small number is pre and big number is post
-        numbers = [
-            int(m.group(1)) if (m := re.match(r"_([\d]+)_LSV_", f.stem)) else 0 for f in lsv_files
-        ]
-        lsv_files = [f for _, f in sorted(zip(numbers, lsv_files, strict=True))]
-        if len(lsv_files) > 2:
-            logger.warning(
-                "- More than two LSV files, assuming %d is pre and %d is post",
-                numbers[0],
-                numbers[-1],
-            )
-
-        if len(lsv_files) == 1:
-            p = "pre" if numbers[0] < 8 else "post"
-            logger.warning("- Only one LSV file found, assuming it is %s", p)
+        if bool(lsv_pre_files) != bool(lsv_post_files):
+            only = "pre" if lsv_pre_files else "post"
+            logger.warning("- Only one LSV file found, assuming it is %s", only)
+        lsv_rows = []
+        for p, lsv_files_p in [("pre", lsv_pre_files), ("post", lsv_post_files)]:
+            if not lsv_files_p:
+                continue
             try:
-                df, results = lsv.analyse(lsv_files[0])
+                df, results = lsv.analyse(lsv_files_p[0])
                 fig, _ax = lsv.plot(df, results)
                 fig.savefig(results_dir / f"lsv_{p}.png")
                 plt.close(fig)
@@ -233,47 +250,12 @@ def analyse_sample(
                     tracked_outputs[f"lsv_{p}"].append(
                         (results_dir / f"lsv_{p}.x").with_suffix(bdf_suffix)
                     )
-                tracked_mpr_inputs[f"lsv_{p}"] = [lsv_files[0]]
-                results = {"Pre or post cycle": p, **results}
-                lsv_df = pd.DataFrame([results])
+                tracked_mpr_inputs[f"lsv_{p}"] = [lsv_files_p[0]]
+                lsv_rows.append({"Pre or post cycle": p, **results})
             except ValueError:
                 logger.exception("Failed to analyse LSV file")
-        else:
-            try:
-                df, results_pre = lsv.analyse(lsv_files[0])
-                df_save_bdf(df, results_dir / "lsv_pre.x", save_format=save_format)
-                fig, _ax = lsv.plot(df, results_pre)
-                fig.savefig(results_dir / "lsv_pre.png")
-                plt.close(fig)
-                lsv_res["pre"] = float(results_pre["Area specific resistance / Ω cm²"])
-                tracked_outputs["lsv_pre"] = [results_dir / "lsv_pre.png"]
-                if bdf_suffix:
-                    tracked_outputs["lsv_pre"].append(
-                        (results_dir / "lsv_pre.x").with_suffix(bdf_suffix)
-                    )
-                tracked_mpr_inputs["lsv_pre"] = [lsv_files[0]]
-
-                df, results_post = lsv.analyse(lsv_files[-1])
-                df_save_bdf(df, results_dir / "lsv_post.x", save_format=save_format)
-                fig, _ax = lsv.plot(df, results_post)
-                fig.savefig(results_dir / "lsv_post.png")
-                plt.close(fig)
-                lsv_res["post"] = float(results_post["Area specific resistance / Ω cm²"])
-                tracked_outputs["lsv_post"] = [results_dir / "lsv_post.png"]
-                if bdf_suffix:
-                    tracked_outputs["lsv_post"].append(
-                        (results_dir / "lsv_post.x").with_suffix(bdf_suffix)
-                    )
-                tracked_mpr_inputs["lsv_post"] = [lsv_files[-1]]
-
-                lsv_df = pd.DataFrame(
-                    [
-                        {"Pre or post cycle": "pre", **results_pre},
-                        {"Pre or post cycle": "post", **results_post},
-                    ]
-                )
-            except ValueError:
-                logger.exception("Failed to analyse LSV file")
+        if lsv_rows:
+            lsv_df = pd.DataFrame(lsv_rows)
 
     logger.info("🚴 Analysing CV")
     cv_res = {"pre": np.nan, "post": np.nan}
@@ -283,8 +265,6 @@ def analyse_sample(
         for p, cv_files in [("pre", cv_files_before), ("post", cv_files_after)]:
             if not cv_files:
                 continue
-            if len(cv_files) > 1:
-                logger.warning("More than one CV file, only reading %s", cv_files[0].stem)
             df, cv_df, capacitance_mF = cv.analyse(cv_files[0])
             df_save_bdf(df, results_dir / f"cv_{p}.x", save_format=save_format)
             fig, _ax = cv.plot(df, cv_df)
@@ -301,11 +281,10 @@ def analyse_sample(
     logger.info("🌈 Analysing PEIS")
     eis_res = {}
     rows = []
-    if len(eis_files) == 0:
+    if not eis_by_tag:
         logger.warning("- ☹️ No EIS files were found, skipping")
     else:
-        tags = ["pre", "pre-50%SOC", "post-50%SOC", "post"]
-        for tag, eis_file in zip(tags, eis_files, strict=False):
+        for tag, eis_file in eis_by_tag.items():
             f = Path(eis_file)
             try:
                 df = read_to_bdf(f)
@@ -516,22 +495,28 @@ def analyse_sample(
     return tracked_outputs, tracked_extra_inputs, fcid
 
 
-def is_sample_folder(folderpath: str | Path) -> bool:
-    """Determine whether a folder is a sample folder. A sample folder contains at least 1 mpr file."""
+def is_sample_folder(folderpath: str | Path, config: PyFlowBattConfig | None = None) -> bool:
+    """Determine whether a folder is a sample folder.
+
+    A sample folder contains at least one file matching any configured technique pattern.
+    """
     folderpath = Path(folderpath)
     if not folderpath.is_dir():
         return False
-    return bool(list(folderpath.glob("*.mpr")))
+    config = config or PyFlowBattConfig.load(folderpath)
+    return any(any(folderpath.glob(p)) for p in config.all_patterns())
 
 
 def find_all_sample_folders(
     folder: str | Path,
     max_search_depth: int = DEFAULT_DEPTH,
     max_folder_searches: int = DEFAULT_SEARCH,
+    config: PyFlowBattConfig | None = None,
 ) -> list[Path]:
     """Find all sample folders in a folder."""
     folder = Path(folder)
-    if is_sample_folder(folder):
+    config = config or PyFlowBattConfig.load(folder)
+    if is_sample_folder(folder, config):
         return [folder]
     sample_folders = []
     depth_exceeded_count = 0
@@ -546,7 +531,7 @@ def find_all_sample_folders(
         if depth > max_search_depth:
             depth_exceeded_count += 1
             return
-        if is_sample_folder(folder):
+        if is_sample_folder(folder, config):
             sample_folders.append(folder)
             return
         for subfolder in folder.iterdir():
@@ -577,10 +562,11 @@ def find_all_sample_summaries(
     folder: str | Path,
     max_search_depth: int = DEFAULT_DEPTH,
     max_folder_searches: int = DEFAULT_SEARCH,
+    config: PyFlowBattConfig | None = None,
 ) -> list[Path]:
     """Collect all summary excels from all subfolders."""
     folder = Path(folder)
-    sample_folders = find_all_sample_folders(folder, max_search_depth, max_folder_searches)
+    sample_folders = find_all_sample_folders(folder, max_search_depth, max_folder_searches, config)
     return [
         f / "results" / "summary.xlsx"
         for f in sample_folders
@@ -588,10 +574,19 @@ def find_all_sample_summaries(
     ]
 
 
-def merge_summaries(summary_xlsxs: list[str | Path]) -> pd.DataFrame:
+def merge_summaries(
+    summary_xlsxs: list[str | Path],
+    configs_by_sample: dict[Path, PyFlowBattConfig] | None = None,
+) -> pd.DataFrame:
     """Merge all summary sheets into one mega summary."""
     summary_xlsxs_paths = [Path(s).resolve() for s in summary_xlsxs]
-    names = [get_sampleid_from_folderpath(s.parent.parent) for s in summary_xlsxs_paths]
+    names = [
+        get_sampleid_from_folderpath(
+            s.parent.parent,
+            (configs_by_sample or {}).get(s.parent.parent),
+        )
+        for s in summary_xlsxs_paths
+    ]
     # append a number to duplicate names
     for i, name in enumerate(names):
         if names.count(name) > 1:
@@ -625,28 +620,27 @@ def analyse_all_samples(
     """Take a folder and run all analysis."""
     folder = Path(folder).resolve()
     pub_info = pub_info_from_root(folder)
-    samples = find_all_sample_folders(folder, max_search_depth, max_folder_searches)
+    search_config = PyFlowBattConfig.load(folder)
+    samples = find_all_sample_folders(folder, max_search_depth, max_folder_searches, search_config)
     if len(samples) == 0:
         logger.error("No sample folders found in %s", folder)
         return
+    configs_by_sample: dict[Path, PyFlowBattConfig] = {s: PyFlowBattConfig.load(s) for s in samples}
     tracked_by_sample: dict[Path, dict[str, list[Path]]] = {}
     tracked_extras_by_sample: dict[Path, dict[str, list[Path]]] = {}
     fcids_by_sample: dict[Path, str | None] = {}
-    if len(samples) == 1:
-        (
-            tracked_by_sample[samples[0]],
-            tracked_extras_by_sample[samples[0]],
-            fcids_by_sample[samples[0]],
-        ) = analyse_sample(samples[0], save_format=save_format, pub_info=pub_info)
-    else:
+    if len(samples) > 1:
         logger.info("Found %d sample folders:", len(samples))
-        for s in samples:
-            tracked_by_sample[s], tracked_extras_by_sample[s], fcids_by_sample[s] = analyse_sample(
-                s, save_format=save_format, pub_info=pub_info
-            )
+    for s in samples:
+        tracked_by_sample[s], tracked_extras_by_sample[s], fcids_by_sample[s] = analyse_sample(
+            s, save_format=save_format, pub_info=pub_info, config=configs_by_sample[s]
+        )
 
-        summaries = find_all_sample_summaries(folder, max_search_depth, max_folder_searches)
-        df = merge_summaries(summaries)
+    if len(samples) > 1:
+        summaries = find_all_sample_summaries(
+            folder, max_search_depth, max_folder_searches, search_config
+        )
+        df = merge_summaries(summaries, configs_by_sample)
         writer = pd.ExcelWriter(folder / "combined_summary.xlsx", engine="xlsxwriter")
         df.to_excel(writer, index=False, sheet_name="Summary")
         workbook = writer.book
@@ -657,7 +651,14 @@ def analyse_all_samples(
 
     from PyFlowBatt.rocrate_output import write_rocrate  # noqa: PLC0415
 
-    write_rocrate(folder, samples, tracked_by_sample, tracked_extras_by_sample, fcids_by_sample)
+    write_rocrate(
+        folder,
+        samples,
+        tracked_by_sample,
+        tracked_extras_by_sample,
+        fcids_by_sample,
+        configs_by_sample,
+    )
     logger.info("📦 Written RO-Crate metadata to %s", folder / "ro-crate-metadata.json")
 
 
@@ -669,7 +670,8 @@ def dry_analyse_all_samples(
     """Take a folder and tell the user what PyFlowBatt would do."""
     logger.info("Beginning dry-run search.")
     folder = Path(folder).resolve()
-    samples = find_all_sample_folders(folder, max_search_depth, max_folder_searches)
+    config = PyFlowBattConfig.load(folder)
+    samples = find_all_sample_folders(folder, max_search_depth, max_folder_searches, config)
     if len(samples) == 0:
         logger.error("No sample folders found in %s", folder)
         return
