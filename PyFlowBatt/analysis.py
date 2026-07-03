@@ -199,9 +199,9 @@ def analyse_sample(
             logger.info("- ☹️ Couldn't convert battinfo xlsx")
 
     logger.info("⛓️‍💥 Analysing OCV")
+    av_ocv = (np.nan, np.nan)
     if len(ocv_files) == 0:
         logger.info("- ☹️ No OCV found, skipping")
-        av_ocv = (np.nan, np.nan)
     else:
         try:
             av_ocv = ocv.analyse(ocv_files[0])
@@ -270,7 +270,8 @@ def analyse_sample(
             fig, _ax = cv.plot(df, cv_df)
             fig.savefig(results_dir / f"cv_{p}.png")
             plt.close(fig)
-            cv_res[p] = capacitance_mF
+            if capacitance_mF:
+                cv_res[p] = capacitance_mF
             tracked_outputs[f"cv_{p}"] = [results_dir / f"cv_{p}.png"]
             if bdf_suffix:
                 tracked_outputs[f"cv_{p}"].append(
