@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from PyFlowBatt.config import PyFlowBattConfig, classify_technique_files
 from PyFlowBatt.rocrate_output import _classify_inputs
 
@@ -115,6 +117,105 @@ def test_sample_id_explicit_override(tmp_path: Path) -> None:
     assert get_sampleid_from_folderpath(sample_dir, config) == "hardcoded-name"
 
 
+def test_sample_id_battinfo_name_used_when_no_toml_override(tmp_path: Path) -> None:
+    """With no pyflowbatt.toml sample_id set, a BattINFO-derived name wins over the folder name."""
+    from PyFlowBatt.analysis import get_sampleid_from_folderpath
+
+    # A folder name that would NOT match the default sample-ID regex.
+    sample_dir = tmp_path / "not-a-normal-sample-name"
+    sample_dir.mkdir()
+
+    config = PyFlowBattConfig.load(sample_dir, home=tmp_path / "home")
+    assert (
+        get_sampleid_from_folderpath(sample_dir, config, battinfo_name="from-battinfo")
+        == "from-battinfo"
+    )
+
+
+def test_sample_id_toml_wins_over_battinfo_when_they_agree(tmp_path: Path) -> None:
+    """A pyflowbatt.toml sample_id matching the BattINFO name is accepted, no error."""
+    from PyFlowBatt.analysis import get_sampleid_from_folderpath
+
+    sample_dir = tmp_path / "sample"
+    sample_dir.mkdir()
+    (sample_dir / "pyflowbatt.toml").write_text('[sample_id]\nname = "agreed-name"\n')
+
+    config = PyFlowBattConfig.load(sample_dir, home=tmp_path / "home")
+    assert (
+        get_sampleid_from_folderpath(sample_dir, config, battinfo_name="agreed-name")
+        == "agreed-name"
+    )
+
+
+def test_sample_id_toml_battinfo_conflict_raises(tmp_path: Path) -> None:
+    """A pyflowbatt.toml sample_id that disagrees with the BattINFO name is an error."""
+    from PyFlowBatt.analysis import get_sampleid_from_folderpath
+
+    sample_dir = tmp_path / "sample"
+    sample_dir.mkdir()
+    (sample_dir / "pyflowbatt.toml").write_text('[sample_id]\nname = "toml-name"\n')
+
+    config = PyFlowBattConfig.load(sample_dir, home=tmp_path / "home")
+    with pytest.raises(ValueError, match="Sample name mismatch"):
+        get_sampleid_from_folderpath(sample_dir, config, battinfo_name="different-battinfo-name")
+
+
+def test_analyse_sample_uses_battinfo_name_when_no_toml_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """analyse_sample resolves sample_id from BattINFO when pyflowbatt.toml doesn't set one."""
+    from PyFlowBatt import analysis as analysis_module
+
+    # A folder name that would NOT match the default sample-ID regex.
+    sample = tmp_path / "not-a-normal-sample-name"
+    sample.mkdir()
+    (sample / "metadata.xlsx").write_text("x")  # content is irrelevant; conversion is stubbed
+
+    def fake_convert(_file: Path) -> dict:
+        return {
+            "@context": {},
+            "@type": "RedoxFlowBattery",
+            "schema:productID": "FCID1",
+            "schema:name": "battinfo-derived-name",
+        }
+
+    monkeypatch.setattr(analysis_module, "convert_excel_to_jsonld", fake_convert)
+
+    config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
+    _tracked_outputs, _tracked_extra_inputs, fcid, sample_id = analysis_module.analyse_sample(
+        sample, save_format=None, config=config
+    )
+    assert sample_id == "battinfo-derived-name"
+    assert fcid == "FCID1"
+    assert (sample / "metadata.battinfo-derived-name.json").exists()
+
+
+def test_analyse_sample_raises_on_toml_battinfo_conflict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """analyse_sample raises when pyflowbatt.toml sample_id disagrees with BattINFO's name."""
+    from PyFlowBatt import analysis as analysis_module
+
+    sample = tmp_path / "sample"
+    sample.mkdir()
+    (sample / "metadata.xlsx").write_text("x")
+    (sample / "pyflowbatt.toml").write_text('[sample_id]\nname = "toml-name"\n')
+
+    def fake_convert(_file: Path) -> dict:
+        return {
+            "@context": {},
+            "@type": "RedoxFlowBattery",
+            "schema:productID": "FCID1",
+            "schema:name": "different-battinfo-name",
+        }
+
+    monkeypatch.setattr(analysis_module, "convert_excel_to_jsonld", fake_convert)
+
+    config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
+    with pytest.raises(ValueError, match="Sample name mismatch"):
+        analysis_module.analyse_sample(sample, save_format=None, config=config)
+
+
 def test_sample_id_custom_pattern(tmp_path: Path) -> None:
     """[sample_id].pattern in pyflowbatt.toml replaces the default sample-ID regex."""
     from PyFlowBatt.analysis import get_sampleid_from_folderpath
@@ -126,6 +227,351 @@ def test_sample_id_custom_pattern(tmp_path: Path) -> None:
     config = PyFlowBattConfig.load(sample_dir, home=tmp_path / "home")
     assert config.sample_id_pattern == r"^[A-Z]+-\d+$"
     assert get_sampleid_from_folderpath(sample_dir, config) == "ABC-123"
+
+
+def test_area_cm2_default(tmp_path: Path) -> None:
+    """Without a pyflowbatt.toml, area_cm2 stays unset (None) so BattINFO/default can resolve it."""
+    sample_dir = tmp_path / "sample"
+    sample_dir.mkdir()
+    config = PyFlowBattConfig.load(sample_dir, home=tmp_path / "home")
+    assert config.area_cm2 is None
+
+
+def test_area_cm2_toml_override(tmp_path: Path) -> None:
+    """area_cm2 in pyflowbatt.toml overrides the default electrode area."""
+    sample_dir = tmp_path / "sample"
+    sample_dir.mkdir()
+    (sample_dir / "pyflowbatt.toml").write_text("area_cm2 = 3.14\n")
+
+    config = PyFlowBattConfig.load(sample_dir, home=tmp_path / "home")
+    assert config.area_cm2 == 3.14
+
+
+def test_area_cm2_bad_value_ignored(tmp_path: Path) -> None:
+    """A non-numeric area_cm2 in pyflowbatt.toml is ignored, keeping the None sentinel."""
+    sample_dir = tmp_path / "sample"
+    sample_dir.mkdir()
+    (sample_dir / "pyflowbatt.toml").write_text('area_cm2 = "not-a-number"\n')
+
+    config = PyFlowBattConfig.load(sample_dir, home=tmp_path / "home")
+    assert config.area_cm2 is None
+
+
+def _make_raw_battinfo_json(
+    *,
+    pos_area: float | None = None,
+    neg_area: float | None = None,
+    unit: str = "unit:CentiM2",
+    resistance_value: float | str | None = None,
+    resistance_unit: str = "unit:OHM",
+) -> dict:
+    """Build a minimal raw BattINFO jsonld dict with optional electrode Area / resistance entries."""
+
+    def electrode(area: float | None) -> dict:
+        properties = []
+        if area is not None:
+            properties.append(
+                {
+                    "@type": "Area",
+                    "hasNumericalPart": {"@type": "emmo:RealData", "hasNumberValue": area},
+                    "hasMeasurementUnit": unit,
+                }
+            )
+        return {"Substrate": {"hasMeasuredProperty": properties}}
+
+    raw_json = {
+        "@context": {},
+        "@type": "RedoxFlowBattery",
+        "schema:productID": "FCID1",
+        "schema:name": "battinfo-name",
+        "hasPositiveElectrode": electrode(pos_area),
+        "hasNegativeElectrode": electrode(neg_area),
+    }
+    if resistance_value is not None:
+        raw_json["hasMeasuredProperty"] = {
+            "@type": "ElectricResistance",
+            "hasNumericalPart": {"@type": "emmo:RealData", "hasNumberValue": resistance_value},
+            "hasMeasurementUnit": resistance_unit,
+        }
+    return raw_json
+
+
+def test_get_area_cm2_default_no_toml_no_battinfo() -> None:
+    """With neither pyflowbatt.toml nor BattINFO, area_cm2 falls back to DEFAULT_AREA_CM2."""
+    from PyFlowBatt.analysis import get_area_cm2
+    from PyFlowBatt.config import DEFAULT_AREA_CM2
+
+    assert get_area_cm2(PyFlowBattConfig()) == DEFAULT_AREA_CM2
+
+
+def test_get_area_cm2_from_battinfo_when_electrodes_agree() -> None:
+    """When positive and negative electrode areas agree, that value is used."""
+    from PyFlowBatt.analysis import get_area_cm2
+
+    raw_json = _make_raw_battinfo_json(pos_area=5.0, neg_area=5.0)
+    assert get_area_cm2(PyFlowBattConfig(), raw_json) == 5.0
+
+
+def test_get_area_cm2_from_battinfo_picks_smaller_when_electrodes_disagree() -> None:
+    """When positive and negative electrode areas disagree, the smaller one is used."""
+    from PyFlowBatt.analysis import get_area_cm2
+
+    raw_json = _make_raw_battinfo_json(pos_area=5.0, neg_area=4.0)
+    assert get_area_cm2(PyFlowBattConfig(), raw_json) == 4.0
+
+
+def test_get_area_cm2_ignores_wrong_unit() -> None:
+    """A BattINFO Area entry in a unit other than CentiM2 is ignored."""
+    from PyFlowBatt.analysis import get_area_cm2
+    from PyFlowBatt.config import DEFAULT_AREA_CM2
+
+    raw_json = _make_raw_battinfo_json(pos_area=5.0, neg_area=5.0, unit="unit:MicroM2")
+    assert get_area_cm2(PyFlowBattConfig(), raw_json) == DEFAULT_AREA_CM2
+
+
+def test_get_area_cm2_toml_wins_when_battinfo_agrees() -> None:
+    """An explicit pyflowbatt.toml area_cm2 that agrees with BattINFO is accepted."""
+    from PyFlowBatt.analysis import get_area_cm2
+
+    raw_json = _make_raw_battinfo_json(pos_area=3.14, neg_area=3.14)
+    config = PyFlowBattConfig(area_cm2=3.14)
+    assert get_area_cm2(config, raw_json) == 3.14
+
+
+def test_get_area_cm2_toml_battinfo_conflict_raises() -> None:
+    """An explicit pyflowbatt.toml area_cm2 that disagrees with BattINFO is an error."""
+    from PyFlowBatt.analysis import get_area_cm2
+
+    raw_json = _make_raw_battinfo_json(pos_area=5.0, neg_area=5.0)
+    config = PyFlowBattConfig(area_cm2=3.14)
+    with pytest.raises(ValueError, match="Electrode area mismatch"):
+        get_area_cm2(config, raw_json)
+
+
+def test_analyse_sample_uses_battinfo_area_for_lsv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """analyse_sample resolves area_cm2 from BattINFO electrodes when no toml override exists."""
+    import pandas as pd
+
+    from PyFlowBatt import analysis as analysis_module
+
+    sample = tmp_path / "sample"
+    sample.mkdir()
+    (sample / "sample_03_LSV_A.mpr").write_text("x")
+    (sample / "sample_13_LSV_B.mpr").write_text("x")
+    (sample / "metadata.xlsx").write_text("x")  # content irrelevant; conversion is stubbed
+
+    raw_json = _make_raw_battinfo_json(pos_area=4.0, neg_area=4.0)
+    monkeypatch.setattr(analysis_module, "convert_excel_to_jsonld", lambda _file: raw_json)
+
+    captured_areas: list[float] = []
+
+    def fake_analyse(filepath: Path, area_cm2: float = 5) -> tuple[pd.DataFrame, dict]:
+        captured_areas.append(area_cm2)
+        df = pd.DataFrame({"Voltage / V": [0.0, 1.0], "Current / A": [0.0, 1.0]})
+        results = {
+            "Fit cutoff current / A": 0.0,
+            "Intercept / A": 0.0,
+            "Slope / Ω⁻¹": 1.0,
+            "Resistance / Ω": 1.0,
+            "Area / cm²": area_cm2,
+            "Area specific resistance / Ω cm²": area_cm2,
+            "File name": Path(filepath).name,
+        }
+        return df, results
+
+    def fake_plot(df: pd.DataFrame, results: dict) -> tuple:
+        import matplotlib.pyplot as plt
+
+        return plt.subplots()
+
+    monkeypatch.setattr(analysis_module.lsv, "analyse", fake_analyse)
+    monkeypatch.setattr(analysis_module.lsv, "plot", fake_plot)
+
+    config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
+    analysis_module.analyse_sample(sample, save_format=None, config=config)
+
+    assert captured_areas == [4.0, 4.0]
+
+
+def test_analyse_sample_raises_on_toml_battinfo_area_conflict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """analyse_sample raises when pyflowbatt.toml area_cm2 disagrees with BattINFO electrodes."""
+    from PyFlowBatt import analysis as analysis_module
+
+    sample = tmp_path / "sample"
+    sample.mkdir()
+    (sample / "metadata.xlsx").write_text("x")
+    (sample / "pyflowbatt.toml").write_text("area_cm2 = 3.14\n")
+
+    raw_json = _make_raw_battinfo_json(pos_area=5.0, neg_area=5.0)
+    monkeypatch.setattr(analysis_module, "convert_excel_to_jsonld", lambda _file: raw_json)
+
+    config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
+    with pytest.raises(ValueError, match="Electrode area mismatch"):
+        analysis_module.analyse_sample(sample, save_format=None, config=config)
+
+
+def test_get_assembled_resistance_ohm_default_no_toml_no_battinfo_no_filename() -> None:
+    """With no toml, no BattINFO, and no fallback filename, the result is NaN."""
+    import math
+
+    from PyFlowBatt.analysis import get_assembled_resistance_ohm
+
+    assert math.isnan(get_assembled_resistance_ohm(PyFlowBattConfig()))
+
+
+def test_get_assembled_resistance_ohm_from_filename_fallback() -> None:
+    """With no toml or BattINFO, the value is parsed out of the fallback filename."""
+    from PyFlowBatt.analysis import get_assembled_resistance_ohm
+
+    value = get_assembled_resistance_ohm(
+        PyFlowBattConfig(), fallback_filename="sample_25kOhm_04_GCPL_CE4"
+    )
+    assert value == 25000.0
+
+
+@pytest.mark.parametrize(
+    ("unit", "expected"),
+    [
+        ("unit:OHM", 25000.0),
+        ("unit:KiloOHM", 25000000.0),
+        ("unit:MegaOHM", 25000000000.0),
+        ("Ohm", 25000.0),
+        ("KiloOhm", 25000000.0),
+        ("MegaOhm", 25000000000.0),
+    ],
+)
+def test_get_assembled_resistance_ohm_from_battinfo_unit_variants(
+    unit: str, expected: float
+) -> None:
+    """All six unit spellings/prefixes convert to ohms correctly."""
+    from PyFlowBatt.analysis import get_assembled_resistance_ohm
+
+    raw_json = _make_raw_battinfo_json(resistance_value="25000", resistance_unit=unit)
+    assert get_assembled_resistance_ohm(PyFlowBattConfig(), raw_json) == expected
+
+
+def test_get_assembled_resistance_ohm_ignores_unrecognized_unit() -> None:
+    """A BattINFO ElectricResistance with an unrecognized unit falls through to the filename."""
+    from PyFlowBatt.analysis import get_assembled_resistance_ohm
+
+    raw_json = _make_raw_battinfo_json(resistance_value="25000", resistance_unit="unit:VOLT")
+    value = get_assembled_resistance_ohm(
+        PyFlowBattConfig(), raw_json, fallback_filename="sample_9kOhm_04_GCPL_CE4"
+    )
+    assert value == 9000.0
+
+
+def test_get_assembled_resistance_ohm_toml_wins_when_battinfo_agrees() -> None:
+    """An explicit pyflowbatt.toml assembled_resistance_ohm that agrees with BattINFO is fine."""
+    from PyFlowBatt.analysis import get_assembled_resistance_ohm
+
+    raw_json = _make_raw_battinfo_json(resistance_value="25000", resistance_unit="unit:OHM")
+    config = PyFlowBattConfig(assembled_resistance_ohm=25000.0)
+    assert get_assembled_resistance_ohm(config, raw_json) == 25000.0
+
+
+def test_get_assembled_resistance_ohm_toml_battinfo_conflict_raises() -> None:
+    """An explicit pyflowbatt.toml assembled_resistance_ohm disagreeing with BattINFO errors."""
+    from PyFlowBatt.analysis import get_assembled_resistance_ohm
+
+    raw_json = _make_raw_battinfo_json(resistance_value="25000", resistance_unit="unit:OHM")
+    config = PyFlowBattConfig(assembled_resistance_ohm=9000.0)
+    with pytest.raises(ValueError, match="Assembled resistance mismatch"):
+        get_assembled_resistance_ohm(config, raw_json)
+
+
+def test_analyse_sample_uses_battinfo_resistance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """analyse_sample resolves the summary's Assembled resistance from BattINFO."""
+    import pandas as pd
+
+    from PyFlowBatt import analysis as analysis_module
+
+    sample = tmp_path / "sample"
+    sample.mkdir()
+    (sample / "metadata.xlsx").write_text("x")  # content irrelevant; conversion is stubbed
+
+    raw_json = _make_raw_battinfo_json(resistance_value="25000", resistance_unit="unit:KiloOHM")
+    monkeypatch.setattr(analysis_module, "convert_excel_to_jsonld", lambda _file: raw_json)
+
+    config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
+    analysis_module.analyse_sample(sample, save_format=None, config=config)
+
+    df = pd.read_excel(sample / "results" / "summary.xlsx", sheet_name="Summary", index_col=0)
+    assert df.loc["Assembled resistance / Ω", "Value"] == 25000000.0
+
+
+def test_analyse_sample_raises_on_toml_battinfo_resistance_conflict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """analyse_sample raises when toml assembled_resistance_ohm disagrees with BattINFO."""
+    from PyFlowBatt import analysis as analysis_module
+
+    sample = tmp_path / "sample"
+    sample.mkdir()
+    (sample / "metadata.xlsx").write_text("x")
+    (sample / "pyflowbatt.toml").write_text("assembled_resistance_ohm = 9000\n")
+
+    raw_json = _make_raw_battinfo_json(resistance_value="25000", resistance_unit="unit:OHM")
+    monkeypatch.setattr(analysis_module, "convert_excel_to_jsonld", lambda _file: raw_json)
+
+    config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
+    with pytest.raises(ValueError, match="Assembled resistance mismatch"):
+        analysis_module.analyse_sample(sample, save_format=None, config=config)
+
+
+def test_area_cm2_passed_to_lsv_analyse(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """analyse_sample threads config.area_cm2 through to the real lsv.analyse call.
+
+    Only LSV files are created (no GCPL/OCV/CV/EIS/battinfo) so analyse_sample's other
+    sections take their "nothing found, skipping" branches without needing to be stubbed.
+    lsv.analyse/lsv.plot are stubbed to avoid parsing real EC-Lab binary data.
+    """
+    import pandas as pd
+
+    from PyFlowBatt import analysis as analysis_module
+
+    sample = tmp_path / "sample"
+    sample.mkdir()
+    (sample / "sample_03_LSV_A.mpr").write_text("x")
+    (sample / "sample_13_LSV_B.mpr").write_text("x")
+    (sample / "pyflowbatt.toml").write_text("area_cm2 = 2.5\n")
+
+    captured_areas: list[float] = []
+
+    def fake_analyse(filepath: Path, area_cm2: float = 5) -> tuple[pd.DataFrame, dict]:
+        captured_areas.append(area_cm2)
+        df = pd.DataFrame({"Voltage / V": [0.0, 1.0], "Current / A": [0.0, 1.0]})
+        results = {
+            "Fit cutoff current / A": 0.0,
+            "Intercept / A": 0.0,
+            "Slope / Ω⁻¹": 1.0,
+            "Resistance / Ω": 1.0,
+            "Area / cm²": area_cm2,
+            "Area specific resistance / Ω cm²": area_cm2,
+            "File name": Path(filepath).name,
+        }
+        return df, results
+
+    def fake_plot(df: pd.DataFrame, results: dict) -> tuple:
+        import matplotlib.pyplot as plt
+
+        return plt.subplots()
+
+    monkeypatch.setattr(analysis_module.lsv, "analyse", fake_analyse)
+    monkeypatch.setattr(analysis_module.lsv, "plot", fake_plot)
+
+    config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
+    assert config.area_cm2 == 2.5
+
+    analysis_module.analyse_sample(sample, save_format=None, config=config)
+
+    assert captured_areas == [2.5, 2.5]
 
 
 def test_cascade_priority(tmp_path: Path) -> None:
