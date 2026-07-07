@@ -444,7 +444,13 @@ def analyse_sample(
         for p, cv_files in [("pre", cv_files_before), ("post", cv_files_after)]:
             if not cv_files:
                 continue
-            df, cv_df, capacitance_mF = cv.analyse(cv_files[0])
+            df, cv_df, capacitance_mF = cv.analyse(
+                cv_files[0],
+                v_min=config.cv_v_min,
+                v_max=config.cv_v_max,
+                v_med=config.cv_v_med,
+                v_range=config.cv_v_range,
+            )
             df_save_bdf(df, results_dir / f"cv_{p}.x", save_format=save_format)
             fig, _ax = cv.plot(df, cv_df)
             fig.savefig(results_dir / f"cv_{p}.png")

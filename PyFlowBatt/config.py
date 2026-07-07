@@ -28,6 +28,13 @@ _TECHNIQUE_KEYS: dict[str, str] = {
     "eis": "eis_patterns",
 }
 
+_CV_KEYS: dict[str, str] = {
+    "v_min": "cv_v_min",
+    "v_max": "cv_v_max",
+    "v_med": "cv_v_med",
+    "v_range": "cv_v_range",
+}
+
 
 def _is_number(value: object) -> bool:
     """Check if value is an int or float."""
@@ -57,6 +64,12 @@ class PyFlowBattConfig:
         area_cm2 = 3.14   # electrode area used to normalise LSV resistance
         assembled_resistance_ohm = 25000   # external resistor value used in the cell assembly
 
+        [cv]
+        v_min = 0.4     # voltage window used to plot
+        v_max = 0.6
+        v_med = 0.5     # midpoint and range sampled to get currents from sweeps
+        v_range = 0.02  # v_med +- v_range sampled
+
     Config files are loaded in ascending priority order: `~/pyflowbatt.toml`
     (lab-wide defaults), the parent folder, then the sample folder itself.
 
@@ -81,6 +94,11 @@ class PyFlowBattConfig:
     lsv_threshold: int = 8  # numeric cutoff for pre/post when only one LSV file is found
     area_cm2: float | None = None  # None lets BattINFO/default resolve it
     assembled_resistance_ohm: float | None = None  # None lets BattINFO/default resolve it
+    # [cv] table settings; defaults match PyFlowBatt.cv.analyse's own defaults
+    cv_v_min: float = 0.4004
+    cv_v_max: float = 0.6
+    cv_v_med: float = 0.5
+    cv_v_range: float = 0.02
 
     @classmethod
     def load(cls, folder: str | Path, *, home: Path | None = None) -> PyFlowBattConfig:
@@ -180,6 +198,14 @@ class PyFlowBattConfig:
                 logger.warning(
                     "Ignoring bad assembled_resistance_ohm in %s (expected number)", path
                 )
+
+        cv = data.get("cv", {})
+        for toml_key, attr in _CV_KEYS.items():
+            if toml_key in cv:
+                if _is_number(cv[toml_key]):
+                    setattr(self, attr, float(cv[toml_key]))
+                else:
+                    logger.warning("Ignoring bad cv.%s in %s (expected number)", toml_key, path)
 
         sid = data.get("sample_id", {})
         if "name" in sid:
