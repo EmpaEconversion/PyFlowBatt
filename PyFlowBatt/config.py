@@ -48,6 +48,8 @@ class PyFlowBattConfig:
         pattern = "^[A-Z]+-\\d+$"     # custom regex
         # name = "daves-new-sample-01"  # or hard-code a fixed name
 
+        area_cm2 = 3.14   # electrode area used to normalise LSV resistance
+
     Config files are loaded in ascending priority order: `~/pyflowbatt.toml`
     (lab-wide defaults), the parent folder, then the sample folder itself.
     """
@@ -62,6 +64,7 @@ class PyFlowBattConfig:
     sample_id_pattern: str = r"^\d+_.+_.+$"
     sample_id: str | None = None  # explicit name; overrides pattern entirely
     lsv_threshold: int = 8  # numeric cutoff for pre/post when only one LSV file is found
+    area_cm2: float = 5  # electrode area (cm^2) used to normalise LSV resistance
 
     @classmethod
     def load(cls, folder: str | Path, *, home: Path | None = None) -> PyFlowBattConfig:
@@ -147,6 +150,14 @@ class PyFlowBattConfig:
                 self.lsv_threshold = data["lsv_threshold"]
             else:
                 logger.warning("Ignoring bad lsv_threshold in %s (expected int)", path)
+
+        if "area_cm2" in data:
+            if isinstance(data["area_cm2"], (int, float)) and not isinstance(
+                data["area_cm2"], bool
+            ):
+                self.area_cm2 = float(data["area_cm2"])
+            else:
+                logger.warning("Ignoring bad area_cm2 in %s (expected number)", path)
 
         sid = data.get("sample_id", {})
         if "name" in sid:

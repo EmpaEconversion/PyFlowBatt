@@ -239,7 +239,7 @@ def analyse_sample(
             if not lsv_files_p:
                 continue
             try:
-                df, results = lsv.analyse(lsv_files_p[0])
+                df, results = lsv.analyse(lsv_files_p[0], area_cm2=config.area_cm2)
                 fig, _ax = lsv.plot(df, results)
                 fig.savefig(results_dir / f"lsv_{p}.png")
                 plt.close(fig)
