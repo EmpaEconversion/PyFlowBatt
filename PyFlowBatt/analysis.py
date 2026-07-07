@@ -55,6 +55,86 @@ def get_res_from_filename(s: str) -> float:
     return np.nan
 
 
+_RESISTANCE_UNIT_MULTIPLIERS = {
+    "ohm": 1.0,
+    "kiloohm": 1e3,
+    "megaohm": 1e6,
+}
+
+
+def _resistance_unit_multiplier(unit: str) -> float | None:
+    """Ohms-per-unit multiplier for a BattINFO resistance unit string.
+
+    Accepts both the qudt-style ``unit:OHM``/``unit:KiloOHM``/``unit:MegaOHM`` and the
+    bare ``Ohm``/``KiloOhm``/``MegaOhm`` forms seen in different BattINFO converter versions.
+    """
+    return _RESISTANCE_UNIT_MULTIPLIERS.get(unit.removeprefix("unit:").lower())
+
+
+def _extract_assembled_resistance_ohm(raw_battinfo_json: dict) -> float | None:
+    """Extract an assembled/external resistance (ohms) from a raw BattINFO jsonld dict."""
+    properties = raw_battinfo_json.get("hasMeasuredProperty") or []
+    if isinstance(properties, dict):
+        properties = [properties]
+    for prop in properties:
+        if not isinstance(prop, dict) or prop.get("@type") != "ElectricResistance":
+            continue
+        unit = prop.get("hasMeasurementUnit")
+        multiplier = _resistance_unit_multiplier(unit) if isinstance(unit, str) else None
+        if multiplier is None:
+            logger.warning(
+                "Ignoring ElectricResistance with unrecognized unit %s in BattINFO file", unit
+            )
+            continue
+        raw_value = prop.get("hasNumericalPart", {}).get("hasNumberValue")
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            continue
+        return value * multiplier
+    return None
+
+
+def get_assembled_resistance_ohm(
+    config: PyFlowBattConfig,
+    raw_battinfo_json: dict | None = None,
+    fallback_filename: str | None = None,
+) -> float:
+    """Resolve the assembled/external resistance (ohms) for the "Assembled resistance" summary.
+
+    Resolved in priority order: an explicit ``assembled_resistance_ohm`` set in
+    pyflowbatt.toml, then an ``ElectricResistance`` measurement in a BattINFO file, then a
+    value parsed out of ``fallback_filename`` (e.g. ``..._25kOhm_...``) via
+    :func:`get_res_from_filename`.
+
+    Raises ``ValueError`` if pyflowbatt.toml sets ``assembled_resistance_ohm`` and a
+    BattINFO-derived value is also available and the two disagree.
+    """
+    battinfo_value = (
+        _extract_assembled_resistance_ohm(raw_battinfo_json)
+        if raw_battinfo_json is not None
+        else None
+    )
+
+    if config.assembled_resistance_ohm is not None:
+        if battinfo_value is not None and battinfo_value != config.assembled_resistance_ohm:
+            msg = (
+                "Assembled resistance mismatch: pyflowbatt.toml sets assembled_resistance_ohm="
+                f"{config.assembled_resistance_ohm} but the BattINFO file gives "
+                f"{battinfo_value} ohm"
+            )
+            raise ValueError(msg)
+        return config.assembled_resistance_ohm
+
+    if battinfo_value is not None:
+        return battinfo_value
+
+    if fallback_filename is not None:
+        return get_res_from_filename(fallback_filename)
+
+    return np.nan
+
+
 def get_sampleid_from_folderpath(
     folderpath: str | Path,
     config: PyFlowBattConfig | None = None,
@@ -293,6 +373,9 @@ def analyse_sample(
 
     sample_id = get_sampleid_from_folderpath(folder, config, battinfo_sample_id)
     area_cm2 = get_area_cm2(config, raw_battinfo_json)
+    assembled_resistance_ohm = get_assembled_resistance_ohm(
+        config, raw_battinfo_json, gcpl_files[0].stem if gcpl_files else None
+    )
 
     logger.info("⛓️‍💥 Analysing OCV")
     av_ocv = (np.nan, np.nan)
@@ -459,7 +542,7 @@ def analyse_sample(
     summary["∆F / mF"]["Value"] = (
         cv_res["post"] - cv_res["pre"] if (cv_res["post"] and cv_res["pre"]) else None
     )
-    summary["Assembled resistance / Ω"]["Value"] = get_res_from_filename(gcpl_files[0].stem)
+    summary["Assembled resistance / Ω"]["Value"] = assembled_resistance_ohm
     summary["EIS R pre / Ω"]["Value"] = eis_res.get("pre", {}).get("R0", {}).get("value")
     summary["EIS R pre / Ω"]["Error"] = eis_res.get("pre", {}).get("R0", {}).get("err")
     summary["EIS R pre-50%SOC / Ω"]["Value"] = (
