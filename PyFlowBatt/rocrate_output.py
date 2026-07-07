@@ -72,10 +72,11 @@ def _rel(path: Path, root: Path) -> str:
 def write_rocrate(
     root_folder: Path,
     sample_folders: list[Path],
-    tracked_by_sample: dict[Path, dict[str, list[Path]]],
-    tracked_extras_by_sample: dict[Path, dict[str, list[Path]]] | None = None,
-    fcids_by_sample: dict[Path, str | None] | None = None,
-    configs_by_sample: dict[Path, PyFlowBattConfig] | None = None,
+    tracked_by_sample_folder: dict[Path, dict[str, list[Path]]],
+    tracked_extras_by_sample_folder: dict[Path, dict[str, list[Path]]] | None = None,
+    fcids_by_sample_folder: dict[Path, str | None] | None = None,
+    configs_by_sample_folder: dict[Path, PyFlowBattConfig] | None = None,
+    sample_ids_by_sample_folder: dict[Path, str] | None = None,
 ) -> None:
     """Write ro-crate-metadata.json at root_folder describing all inputs and outputs."""
     crate = ROCrate()
@@ -88,11 +89,13 @@ def write_rocrate(
     all_sample_datasets = []
 
     for sample_folder in sample_folders:
-        config = (configs_by_sample or {}).get(sample_folder)
-        sample_id = get_sampleid_from_folderpath(sample_folder, config)
+        config = (configs_by_sample_folder or {}).get(sample_folder)
+        sample_id = (sample_ids_by_sample_folder or {}).get(
+            sample_folder
+        ) or get_sampleid_from_folderpath(sample_folder, config)
         rel_sample = _rel(sample_folder, root_folder)
 
-        fcid = fcids_by_sample.get(sample_folder) if fcids_by_sample else None
+        fcid = fcids_by_sample_folder.get(sample_folder) if fcids_by_sample_folder else None
         sample_props: dict = {
             "name": sample_id,
             "description": f"Electrochemical cell measurements: {sample_folder.name}",
@@ -126,7 +129,11 @@ def write_rocrate(
 
         all_input_entities = [e for ents in input_entities.values() for e in ents]
 
-        extras = tracked_extras_by_sample.get(sample_folder, {}) if tracked_extras_by_sample else {}
+        extras = (
+            tracked_extras_by_sample_folder.get(sample_folder, {})
+            if tracked_extras_by_sample_folder
+            else {}
+        )
         extra_entities: dict[str, list] = {}
         for label, paths in extras.items():
             desc = EXTRA_INPUT_DESCRIPTIONS.get(label, label)
@@ -150,7 +157,7 @@ def write_rocrate(
             if label_extra_ents:
                 extra_entities[label] = label_extra_ents
 
-        for label, paths in tracked_by_sample.get(sample_folder, {}).items():
+        for label, paths in tracked_by_sample_folder.get(sample_folder, {}).items():
             if label == "metadata":
                 derived_from = extra_entities.get("battinfo_xlsx") or None
             else:

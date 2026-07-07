@@ -58,17 +58,31 @@ def get_res_from_filename(s: str) -> float:
 def get_sampleid_from_folderpath(
     folderpath: str | Path,
     config: PyFlowBattConfig | None = None,
+    battinfo_name: str | None = None,
 ) -> str:
-    """Get the sample ID given a folder to a sample.
+    """Get the sample ID for a sample folder.
 
-    Usually it is just the folder name, sometimes the parent.
-    Pass a ``PyFlowBattConfig`` to use a custom pattern or an explicit name.
+    Resolved in priority order: an explicit ``sample_id`` set in pyflowbatt.toml, then
+    the sample name from a BattINFO file (pass it as ``battinfo_name``), then a name
+    derived from the folder path (usually the folder name, sometimes the parent).
+
+    Raises ``ValueError`` if pyflowbatt.toml sets an explicit ``sample_id`` and a
+    ``battinfo_name`` is also given and the two disagree.
     """
     folderpath = Path(folderpath)
     config = config or PyFlowBattConfig.load(folderpath)
 
     if config.sample_id is not None:
+        if battinfo_name is not None and battinfo_name != config.sample_id:
+            msg = (
+                f"Sample name mismatch for {folderpath}: pyflowbatt.toml sets sample_id "
+                f"'{config.sample_id}' but the BattINFO file gives '{battinfo_name}'"
+            )
+            raise ValueError(msg)
         return config.sample_id
+
+    if battinfo_name is not None:
+        return battinfo_name
 
     pattern = config.sample_id_pattern
     # Sample ID has format [digits]_[somethingelse]_[somethingelse]
@@ -104,7 +118,7 @@ def analyse_sample(
     pub_info: dict | None = None,
     save_format: SAVE_FORMATS = "parquet",
     config: PyFlowBattConfig | None = None,
-) -> tuple[dict[str, list[Path]], dict[str, list[Path]], str | None]:
+) -> tuple[dict[str, list[Path]], dict[str, list[Path]], str | None, str]:
     """Read all the files in a folder, analayse and plot everything.
 
     Without an explicit config, loads a ``pyflowbatt.toml`` cascade (home directory,
@@ -197,6 +211,8 @@ def analyse_sample(
             break
         else:
             logger.info("- ☹️ Couldn't convert battinfo xlsx")
+
+    sample_id = get_sampleid_from_folderpath(folder, config, battinfo_sample_id)
 
     logger.info("⛓️‍💥 Analysing OCV")
     av_ocv = (np.nan, np.nan)
@@ -464,8 +480,10 @@ def analyse_sample(
         zenodo_url = pub_info.get("zenodo_doi_url") if pub_info else None
         for label, paths in tracked_mpr_inputs.items():
             for path in paths:
-                snippet = battinfo.add_input_data(
-                    path.relative_to(folder).as_posix(), zenodo_url, MPR_DESCRIPTIONS.get(label)
+                snippet = battinfo.add_data(
+                    path.relative_to(folder).as_posix(),
+                    zenodo_url,
+                    extras={"rdfs:comment": MPR_DESCRIPTIONS.get(label)},
                 )
                 battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
         for path in mps_files:
@@ -488,12 +506,12 @@ def analyse_sample(
                 with contextlib.suppress(ValueError):
                     snippet = battinfo.add_data(rel, zenodo_url)
                     battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
-        metadata_path = folder / f"metadata.{battinfo_sample_id}.json"
+        metadata_path = folder / f"metadata.{sample_id}.json"
         with metadata_path.open("w") as mf:
             json.dump(battinfo_json, mf, indent=4)
         tracked_outputs["metadata"] = [metadata_path]
 
-    return tracked_outputs, tracked_extra_inputs, fcid
+    return tracked_outputs, tracked_extra_inputs, fcid, sample_id
 
 
 def is_sample_folder(folderpath: str | Path, config: PyFlowBattConfig | None = None) -> bool:
@@ -577,15 +595,13 @@ def find_all_sample_summaries(
 
 def merge_summaries(
     summary_xlsxs: list[str | Path],
-    configs_by_sample: dict[Path, PyFlowBattConfig] | None = None,
+    sample_ids_by_sample_folder: dict[Path, str] | None = None,
 ) -> pd.DataFrame:
     """Merge all summary sheets into one mega summary."""
     summary_xlsxs_paths = [Path(s).resolve() for s in summary_xlsxs]
     names = [
-        get_sampleid_from_folderpath(
-            s.parent.parent,
-            (configs_by_sample or {}).get(s.parent.parent),
-        )
+        (sample_ids_by_sample_folder or {}).get(s.parent.parent)
+        or get_sampleid_from_folderpath(s.parent.parent)
         for s in summary_xlsxs_paths
     ]
     # append a number to duplicate names
@@ -622,26 +638,39 @@ def analyse_all_samples(
     folder = Path(folder).resolve()
     pub_info = pub_info_from_root(folder)
     search_config = PyFlowBattConfig.load(folder)
-    samples = find_all_sample_folders(folder, max_search_depth, max_folder_searches, search_config)
-    if len(samples) == 0:
+    sample_folders = find_all_sample_folders(
+        folder, max_search_depth, max_folder_searches, search_config
+    )
+    if len(sample_folders) == 0:
         logger.error("No sample folders found in %s", folder)
         return
-    configs_by_sample: dict[Path, PyFlowBattConfig] = {s: PyFlowBattConfig.load(s) for s in samples}
-    tracked_by_sample: dict[Path, dict[str, list[Path]]] = {}
-    tracked_extras_by_sample: dict[Path, dict[str, list[Path]]] = {}
-    fcids_by_sample: dict[Path, str | None] = {}
-    if len(samples) > 1:
-        logger.info("Found %d sample folders:", len(samples))
-    for s in samples:
-        tracked_by_sample[s], tracked_extras_by_sample[s], fcids_by_sample[s] = analyse_sample(
-            s, save_format=save_format, pub_info=pub_info, config=configs_by_sample[s]
+    configs_by_sample_folder: dict[Path, PyFlowBattConfig] = {
+        sample_folder: PyFlowBattConfig.load(sample_folder) for sample_folder in sample_folders
+    }
+    tracked_by_sample_folder: dict[Path, dict[str, list[Path]]] = {}
+    tracked_extras_by_sample_folder: dict[Path, dict[str, list[Path]]] = {}
+    fcids_by_sample_folder: dict[Path, str | None] = {}
+    sample_ids_by_sample_folder: dict[Path, str] = {}
+    if len(sample_folders) > 1:
+        logger.info("Found %d sample folders:", len(sample_folders))
+    for sample_folder in sample_folders:
+        (
+            tracked_by_sample_folder[sample_folder],
+            tracked_extras_by_sample_folder[sample_folder],
+            fcids_by_sample_folder[sample_folder],
+            sample_ids_by_sample_folder[sample_folder],
+        ) = analyse_sample(
+            sample_folder,
+            save_format=save_format,
+            pub_info=pub_info,
+            config=configs_by_sample_folder[sample_folder],
         )
 
-    if len(samples) > 1:
+    if len(sample_folders) > 1:
         summaries = find_all_sample_summaries(
             folder, max_search_depth, max_folder_searches, search_config
         )
-        df = merge_summaries(summaries, configs_by_sample)
+        df = merge_summaries(summaries, sample_ids_by_sample_folder)
         writer = pd.ExcelWriter(folder / "combined_summary.xlsx", engine="xlsxwriter")
         df.to_excel(writer, index=False, sheet_name="Summary")
         workbook = writer.book
@@ -654,11 +683,12 @@ def analyse_all_samples(
 
     write_rocrate(
         folder,
-        samples,
-        tracked_by_sample,
-        tracked_extras_by_sample,
-        fcids_by_sample,
-        configs_by_sample,
+        sample_folders,
+        tracked_by_sample_folder,
+        tracked_extras_by_sample_folder,
+        fcids_by_sample_folder,
+        configs_by_sample_folder,
+        sample_ids_by_sample_folder,
     )
     logger.info("📦 Written RO-Crate metadata to %s", folder / "ro-crate-metadata.json")
 
@@ -672,18 +702,18 @@ def dry_analyse_all_samples(
     logger.info("Beginning dry-run search.")
     folder = Path(folder).resolve()
     config = PyFlowBattConfig.load(folder)
-    samples = find_all_sample_folders(folder, max_search_depth, max_folder_searches, config)
-    if len(samples) == 0:
+    sample_folders = find_all_sample_folders(folder, max_search_depth, max_folder_searches, config)
+    if len(sample_folders) == 0:
         logger.error("No sample folders found in %s", folder)
         return
-    if len(samples) == 1:
+    if len(sample_folders) == 1:
         logger.info("Found 1 sample inside")
     else:
-        logger.info("Found %d samples inside.", len(samples))
+        logger.info("Found %d samples inside.", len(sample_folders))
     logger.info("I would analyse the following samples and make a 'results' subfolder inside:")
-    for s in samples:
-        logger.info("  - %s", s)
-    if len(samples) > 1:
+    for sample_folder in sample_folders:
+        logger.info("  - %s", sample_folder)
+    if len(sample_folders) > 1:
         logger.info(
             "Then I would combine all the summaries into one 'combined_results' subfolder inside %s.",
             folder,
