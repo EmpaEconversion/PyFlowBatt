@@ -105,20 +105,20 @@ def test_shared_classifier_used_by_rocrate(tmp_path: Path) -> None:
 
 
 def test_sample_id_explicit_override(tmp_path: Path) -> None:
-    """[sample_id].name in pyflowbatt.toml overrides detection, regardless of folder name."""
+    """sample_name in pyflowbatt.toml overrides detection, regardless of folder name."""
     from PyFlowBatt.analysis import get_sampleid_from_folderpath
 
     # A folder name that would NOT match the default sample-ID regex.
     sample_dir = tmp_path / "not-a-normal-sample-name"
     sample_dir.mkdir()
-    (sample_dir / "pyflowbatt.toml").write_text('[sample_id]\nname = "hardcoded-name"\n')
+    (sample_dir / "pyflowbatt.toml").write_text('sample_name = "hardcoded-name"\n')
 
     config = PyFlowBattConfig.load(sample_dir, home=tmp_path / "home")
     assert get_sampleid_from_folderpath(sample_dir, config) == "hardcoded-name"
 
 
 def test_sample_id_battinfo_name_used_when_no_toml_override(tmp_path: Path) -> None:
-    """With no pyflowbatt.toml sample_id set, a BattINFO-derived name wins over the folder name."""
+    """With no pyflowbatt.toml sample_name set, a BattINFO name wins over the folder name."""
     from PyFlowBatt.analysis import get_sampleid_from_folderpath
 
     # A folder name that would NOT match the default sample-ID regex.
@@ -133,12 +133,12 @@ def test_sample_id_battinfo_name_used_when_no_toml_override(tmp_path: Path) -> N
 
 
 def test_sample_id_toml_wins_over_battinfo_when_they_agree(tmp_path: Path) -> None:
-    """A pyflowbatt.toml sample_id matching the BattINFO name is accepted, no error."""
+    """A pyflowbatt.toml sample_name matching the BattINFO name is accepted, no error."""
     from PyFlowBatt.analysis import get_sampleid_from_folderpath
 
     sample_dir = tmp_path / "sample"
     sample_dir.mkdir()
-    (sample_dir / "pyflowbatt.toml").write_text('[sample_id]\nname = "agreed-name"\n')
+    (sample_dir / "pyflowbatt.toml").write_text('sample_name = "agreed-name"\n')
 
     config = PyFlowBattConfig.load(sample_dir, home=tmp_path / "home")
     assert (
@@ -148,12 +148,12 @@ def test_sample_id_toml_wins_over_battinfo_when_they_agree(tmp_path: Path) -> No
 
 
 def test_sample_id_toml_battinfo_conflict_raises(tmp_path: Path) -> None:
-    """A pyflowbatt.toml sample_id that disagrees with the BattINFO name is an error."""
+    """A pyflowbatt.toml sample_name that disagrees with the BattINFO name is an error."""
     from PyFlowBatt.analysis import get_sampleid_from_folderpath
 
     sample_dir = tmp_path / "sample"
     sample_dir.mkdir()
-    (sample_dir / "pyflowbatt.toml").write_text('[sample_id]\nname = "toml-name"\n')
+    (sample_dir / "pyflowbatt.toml").write_text('sample_name = "toml-name"\n')
 
     config = PyFlowBattConfig.load(sample_dir, home=tmp_path / "home")
     with pytest.raises(ValueError, match="Sample name mismatch"):
@@ -163,7 +163,7 @@ def test_sample_id_toml_battinfo_conflict_raises(tmp_path: Path) -> None:
 def test_analyse_sample_uses_battinfo_name_when_no_toml_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """analyse_sample resolves sample_id from BattINFO when pyflowbatt.toml doesn't set one."""
+    """analyse_sample resolves sample_name from BattINFO when pyflowbatt.toml doesn't set one."""
     from PyFlowBatt import analysis as analysis_module
 
     # A folder name that would NOT match the default sample-ID regex.
@@ -193,13 +193,13 @@ def test_analyse_sample_uses_battinfo_name_when_no_toml_override(
 def test_analyse_sample_raises_on_toml_battinfo_conflict(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """analyse_sample raises when pyflowbatt.toml sample_id disagrees with BattINFO's name."""
+    """analyse_sample raises when pyflowbatt.toml sample_name disagrees with BattINFO's name."""
     from PyFlowBatt import analysis as analysis_module
 
     sample = tmp_path / "sample"
     sample.mkdir()
     (sample / "metadata.xlsx").write_text("x")
-    (sample / "pyflowbatt.toml").write_text('[sample_id]\nname = "toml-name"\n')
+    (sample / "pyflowbatt.toml").write_text('sample_name = "toml-name"\n')
 
     def fake_convert(_file: Path) -> dict:
         return {
@@ -217,15 +217,15 @@ def test_analyse_sample_raises_on_toml_battinfo_conflict(
 
 
 def test_sample_id_custom_pattern(tmp_path: Path) -> None:
-    """[sample_id].pattern in pyflowbatt.toml replaces the default sample-ID regex."""
+    """sample_name_pattern in pyflowbatt.toml replaces the default sample-ID regex."""
     from PyFlowBatt.analysis import get_sampleid_from_folderpath
 
     sample_dir = tmp_path / "ABC-123"
     sample_dir.mkdir()
-    (sample_dir / "pyflowbatt.toml").write_text('[sample_id]\npattern = "^[A-Z]+-\\\\d+$"\n')
+    (sample_dir / "pyflowbatt.toml").write_text('sample_name_pattern = "^[A-Z]+-\\\\d+$"\n')
 
     config = PyFlowBattConfig.load(sample_dir, home=tmp_path / "home")
-    assert config.sample_id_pattern == r"^[A-Z]+-\d+$"
+    assert config.sample_name_pattern == r"^[A-Z]+-\d+$"
     assert get_sampleid_from_folderpath(sample_dir, config) == "ABC-123"
 
 

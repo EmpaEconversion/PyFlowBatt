@@ -142,29 +142,29 @@ def get_sampleid_from_folderpath(
 ) -> str:
     """Get the sample ID for a sample folder.
 
-    Resolved in priority order: an explicit ``sample_id`` set in pyflowbatt.toml, then
+    Resolved in priority order: an explicit ``sample_name`` set in pyflowbatt.toml, then
     the sample name from a BattINFO file (pass it as ``battinfo_name``), then a name
     derived from the folder path (usually the folder name, sometimes the parent).
 
-    Raises ``ValueError`` if pyflowbatt.toml sets an explicit ``sample_id`` and a
+    Raises ``ValueError`` if pyflowbatt.toml sets an explicit ``sample_name`` and a
     ``battinfo_name`` is also given and the two disagree.
     """
     folderpath = Path(folderpath)
     config = config or PyFlowBattConfig.load(folderpath)
 
-    if config.sample_id is not None:
-        if battinfo_name is not None and battinfo_name != config.sample_id:
+    if config.sample_name is not None:
+        if battinfo_name is not None and battinfo_name != config.sample_name:
             msg = (
-                f"Sample name mismatch for {folderpath}: pyflowbatt.toml sets sample_id "
-                f"'{config.sample_id}' but the BattINFO file gives '{battinfo_name}'"
+                f"Sample name mismatch for {folderpath}: pyflowbatt.toml sets sample_name "
+                f"'{config.sample_name}' but the BattINFO file gives '{battinfo_name}'"
             )
             raise ValueError(msg)
-        return config.sample_id
+        return config.sample_name
 
     if battinfo_name is not None:
         return battinfo_name
 
-    pattern = config.sample_id_pattern
+    pattern = config.sample_name_pattern
     # Sample ID has format [digits]_[somethingelse]_[somethingelse]
     # e.g. 250115_reda_1M-blahblahblah
     if re.match(pattern=pattern, string=folderpath.stem):

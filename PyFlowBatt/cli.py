@@ -5,6 +5,23 @@ import logging
 from pathlib import Path
 
 from PyFlowBatt.analysis import analyse_all_samples, dry_analyse_all_samples
+from PyFlowBatt.config import CONFIG_FILENAME, write_template_config
+
+
+def init_config(folder: str | None = None) -> None:
+    """Write a template pyflowbatt.toml into folder (default: current directory)."""
+    folderpath = Path.cwd() if not folder else Path(folder)
+    logger = logging.getLogger("PyFlowBatt")
+    logger.addHandler(logging.StreamHandler())
+    logger.setLevel(logging.INFO)
+
+    try:
+        path = write_template_config(folderpath)
+    except FileExistsError:
+        # Expected/handled condition, not a bug - a traceback here would be noisy.
+        logger.error("%s already exists, not overwriting", folderpath / CONFIG_FILENAME)  # noqa: TRY400
+        return
+    logger.info("Wrote template config to %s", path)
 
 
 def analyse(
@@ -41,6 +58,18 @@ def analyse(
 def main() -> None:
     """PyFlowBatt CLI."""
     parser = argparse.ArgumentParser(prog="pyflowbatt")
+    subparsers = parser.add_subparsers(dest="command")
+
+    init_parser = subparsers.add_parser(
+        "init",
+        help=f"Write a template {CONFIG_FILENAME} into a folder (fully commented out)",
+    )
+    init_parser.add_argument(
+        "--folder",
+        type=str,
+        help="Folder to write the template into, if not specified, use the current folder",
+    )
+
     parser.add_argument(
         "--dry", action="store_true", help="Don't do any analysis, just check the folders"
     )
@@ -58,6 +87,11 @@ def main() -> None:
         help="Maximum depth of searching when looking for sample folders",
     )
     args = parser.parse_args()
+
+    if args.command == "init":
+        init_config(folder=args.folder)
+        return
+
     kwargs: dict = {}
     if args.max_folder_searches is not None:
         kwargs["max_folder_searches"] = args.max_folder_searches

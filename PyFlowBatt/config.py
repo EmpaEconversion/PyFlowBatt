@@ -50,21 +50,20 @@ class PyFlowBattConfig:
 
         Example `pyflowbatt.toml`:
 
+        sample_name = "daves-new-sample-01"    # hard-code an explicit sample name
+        sample_name_pattern = "^[A-Z]+-\\d+$"  # or a custom regex, if not hard-coded
+
         extra_extensions = [".mgr"]
         # or fully replace the extension list:
         # extensions = [".mpr", ".mgr"]
 
-        [extra_patterns]
-        eis  = ["*_EIS_*"]    # adds to the built-in *_PEIS_*
-        gcpl = ["*_GCD_*"]
-
-        [sample_id]
-        pattern = "^[A-Z]+-\\d+$"     # custom regex
-        # name = "daves-new-sample-01"  # or hard-code a fixed name
-
         area_cm2 = 3.14   # electrode area used to normalise LSV resistance
         assembled_resistance_ohm = 25000   # external resistor value used in the cell assembly
         summary_n_cycles = [10, 20, 30, 40, 50]  # cycle counts reported in the summary sheet
+
+        [extra_patterns]
+        eis  = ["*_EIS_*"]    # adds to the built-in *_PEIS_*
+        gcpl = ["*_GCD_*"]
 
         [cv]
         v_min = 0.4     # voltage window used to plot
@@ -92,8 +91,8 @@ class PyFlowBattConfig:
     cv_post_patterns: list[str] = field(default_factory=lambda: ["*_CVApost*", "*_CVpost*"])
     eis_patterns: list[str] = field(default_factory=lambda: ["*_PEIS_*"])
     extensions: list[str] = field(default_factory=lambda: [".mpr"])
-    sample_id_pattern: str = r"^\d+_.+_.+$"
-    sample_id: str | None = None  # overrides pattern entirely
+    sample_name_pattern: str = r"^\d+_.+_.+$"
+    sample_name: str | None = None  # overrides pattern entirely
     lsv_threshold: int = 8  # numeric cutoff for pre/post when only one LSV file is found
     area_cm2: float | None = None  # None lets BattINFO/default resolve it
     assembled_resistance_ohm: float | None = None  # None lets BattINFO/default resolve it
@@ -222,17 +221,83 @@ class PyFlowBattConfig:
                 else:
                     logger.warning("Ignoring bad cv.%s in %s (expected number)", toml_key, path)
 
-        sid = data.get("sample_id", {})
-        if "name" in sid:
-            if isinstance(sid["name"], str):
-                self.sample_id = sid["name"]
+        if "sample_name" in data:
+            if isinstance(data["sample_name"], str):
+                self.sample_name = data["sample_name"]
             else:
-                logger.warning("Ignoring bad sample_id.name in %s (expected string)", path)
-        if "pattern" in sid:
-            if isinstance(sid["pattern"], str):
-                self.sample_id_pattern = sid["pattern"]
+                logger.warning("Ignoring bad sample_name in %s (expected string)", path)
+
+        if "sample_name_pattern" in data:
+            if isinstance(data["sample_name_pattern"], str):
+                self.sample_name_pattern = data["sample_name_pattern"]
             else:
-                logger.warning("Ignoring bad sample_id.pattern in %s (expected string)", path)
+                logger.warning("Ignoring bad sample_name_pattern in %s (expected string)", path)
+
+
+TEMPLATE_TOML = """\
+# pyflowbatt.toml — optional PyFlowBatt configuration.
+#
+# Every setting below is commented out and shows its built-in default.
+# Uncomment and edit only the settings you want to override.
+#
+# You can put config files in:
+# The home folder (~/pyflowbatt.toml): will apply EVERYWHERE
+# The parent folder: applies to every sample folder inside
+# The sample folder itself: only applies to that sample
+# On conflicts, sample takes priority, then parent, then home.
+#
+# --- Sample name (default: reads from battinfo, otherwise uses folder name) ---
+# sample_name = "daves-new-sample-01"      # hard-code an explicit sample name
+# sample_name_pattern = "^[A-Z]+-\\\\d+$"  # or a custom regex, if not hard-coded
+
+# --- File extensions searched for technique files ---
+
+# extra_extensions = [".mgr"]      # add extra extensions to the default [".mpr"]
+# extensions = [".mpr", ".mgr"]    # or fully replace the extension list instead of adding to it
+
+# --- LSV pre/post split: file numbers below this are "pre", at/above are "post" ---
+# lsv_threshold = 8
+
+# --- Electrode area (cm^2), used to normalise LSV resistance ---
+# area_cm2 = 5
+
+# --- Assembled/external resistance (ohms) ---
+# assembled_resistance_ohm = 25000
+
+# --- Cycle counts reported in the summary sheet ---
+# summary_n_cycles = [10, 20, 30, 40, 50]
+
+# --- Extra filename glob patterns per technique (added to the built-in patterns below) ---
+# [extra_patterns]
+# gcpl    = ["*_cycling_*"]                  # built-in: *_GCPL_*
+# ocv     = ["*_rest_*"]                     # built-in: *_OCV_*
+# lsv     = ["*_linear-sweep_*"]             # built-in: *_LSV_*
+# cv_pre  = ["*_cyclic-voltammetry-pre_*"]   # built-in: *_CVApre*, *_CVpre*
+# cv_post = ["*_cyclic-voltammetry-post_*"]  # built-in: *_CVApost*, *_CVpost*
+# eis     = ["*_impedance_*"]                # built-in: *_PEIS_*
+
+# --- CV analysis parameters ---
+# [cv]
+# v_min = 0.4004   # voltage window used to compute scan rate
+# v_max = 0.6
+# v_med = 0.5      # midpoint voltage sampled for up/downsweep current
+# v_range = 0.02   # v_med +- v_range sampled
+# min_r2 = 0.8     # fit-quality gate below which capacitance isn't reported
+"""
+
+
+def write_template_config(folder: str | Path) -> Path:
+    """Write a fully-commented pyflowbatt.toml template into `folder`.
+
+    Raises FileExistsError if a pyflowbatt.toml already exists there — never overwrites.
+    """
+    folder = Path(folder)
+    path = folder / CONFIG_FILENAME
+    if path.exists():
+        msg = f"{path} already exists, not overwriting"
+        raise FileExistsError(msg)
+    path.write_text(TEMPLATE_TOML, encoding="utf-8")
+    return path
 
 
 def _glob_many(folder: Path, patterns: list[str], extensions: list[str]) -> list[Path]:
