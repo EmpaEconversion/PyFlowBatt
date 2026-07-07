@@ -13,7 +13,7 @@ import pandas as pd
 from battinfoconverter_backend import convert_excel_to_jsonld
 
 from PyFlowBatt import battinfo, cv, eis, gcpl, lsv, ocv
-from PyFlowBatt.config import EIS_TAGS, PyFlowBattConfig, classify_technique_files
+from PyFlowBatt.config import DEFAULT_AREA_CM2, EIS_TAGS, PyFlowBattConfig, classify_technique_files
 from PyFlowBatt.read import read_to_bdf
 
 logger = logging.getLogger(__name__)
@@ -98,6 +98,80 @@ def get_sampleid_from_folderpath(
     return "Unknown sample"
 
 
+def _extract_electrode_area_cm2(raw_battinfo_json: dict, electrode_key: str) -> float | None:
+    """Extract a Substrate Area (cm^2) for one electrode from a raw BattINFO jsonld dict.
+
+    ``electrode_key`` is ``"hasPositiveElectrode"`` or ``"hasNegativeElectrode"``.
+    """
+    electrode = raw_battinfo_json.get(electrode_key)
+    if not isinstance(electrode, dict):
+        return None
+    substrate = electrode.get("Substrate")
+    if not isinstance(substrate, dict):
+        return None
+    properties = substrate.get("hasMeasuredProperty") or []
+    if isinstance(properties, dict):
+        properties = [properties]
+    for prop in properties:
+        if not isinstance(prop, dict) or prop.get("@type") != "Area":
+            continue
+        unit = prop.get("hasMeasurementUnit")
+        if unit != "unit:CentiM2":
+            logger.warning(
+                "Ignoring %s Area with unit %s in BattINFO file (expected unit:CentiM2)",
+                electrode_key,
+                unit,
+            )
+            continue
+        value = prop.get("hasNumericalPart", {}).get("hasNumberValue")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+    return None
+
+
+def get_area_cm2(config: PyFlowBattConfig, raw_battinfo_json: dict | None = None) -> float:
+    """Resolve the electrode area (cm^2) used to normalise LSV resistance.
+
+    Resolved in priority order: an explicit ``area_cm2`` set in pyflowbatt.toml, then the
+    BattINFO file's positive/negative electrode Substrate Area (if both are present and
+    disagree, the smaller is used), then :data:`PyFlowBatt.config.DEFAULT_AREA_CM2`.
+
+    Raises ``ValueError`` if pyflowbatt.toml sets ``area_cm2`` and a BattINFO-derived area
+    is also available and the two disagree.
+    """
+    battinfo_area: float | None = None
+    if raw_battinfo_json is not None:
+        pos = _extract_electrode_area_cm2(raw_battinfo_json, "hasPositiveElectrode")
+        neg = _extract_electrode_area_cm2(raw_battinfo_json, "hasNegativeElectrode")
+        if pos is not None and neg is not None:
+            if pos != neg:
+                logger.warning(
+                    "Positive (%.4g cm2) and negative (%.4g cm2) electrode areas disagree "
+                    "in BattINFO file; using the smaller",
+                    pos,
+                    neg,
+                )
+            battinfo_area = min(pos, neg)
+        elif pos is not None:
+            battinfo_area = pos
+        elif neg is not None:
+            battinfo_area = neg
+
+    if config.area_cm2 is not None:
+        if battinfo_area is not None and battinfo_area != config.area_cm2:
+            msg = (
+                f"Electrode area mismatch: pyflowbatt.toml sets area_cm2={config.area_cm2} "
+                f"but the BattINFO file gives {battinfo_area} cm2"
+            )
+            raise ValueError(msg)
+        return config.area_cm2
+
+    if battinfo_area is not None:
+        return battinfo_area
+
+    return DEFAULT_AREA_CM2
+
+
 def df_save_bdf(df: pd.DataFrame, filepath: Path, save_format: SAVE_FORMATS = "parquet") -> None:
     """Save df to file."""
     if save_format is None:
@@ -172,6 +246,7 @@ def analyse_sample(
     logger.info("Battinfo-ifying")
     battinfo_json = None
     battinfo_sample_id = None
+    raw_battinfo_json: dict | None = None
     if not battinfo_files:
         logger.info("- ☹️ No battinfo xlsx found, skipping")
     else:
@@ -184,7 +259,11 @@ def analyse_sample(
             battinfo_xlsx_path = file
             fcid = raw_json["schema:productID"]
             battinfo_sample_id = raw_json["schema:name"]
+            raw_battinfo_json = raw_json
             battinfo_json = battinfo.make_test_object(raw_json)
+            battinfo_json = battinfo.merge_jsonld_on_type(
+                [battinfo_json, battinfo.add_input_and_output()],
+            )
             if pub_info and pub_info.get("citation_string"):
                 battinfo_json = battinfo.merge_jsonld_on_type(
                     [battinfo_json, battinfo.add_citation(pub_info["citation_string"])]
@@ -213,6 +292,7 @@ def analyse_sample(
             logger.info("- ☹️ Couldn't convert battinfo xlsx")
 
     sample_id = get_sampleid_from_folderpath(folder, config, battinfo_sample_id)
+    area_cm2 = get_area_cm2(config, raw_battinfo_json)
 
     logger.info("⛓️‍💥 Analysing OCV")
     av_ocv = (np.nan, np.nan)
@@ -255,7 +335,7 @@ def analyse_sample(
             if not lsv_files_p:
                 continue
             try:
-                df, results = lsv.analyse(lsv_files_p[0], area_cm2=config.area_cm2)
+                df, results = lsv.analyse(lsv_files_p[0], area_cm2=area_cm2)
                 fig, _ax = lsv.plot(df, results)
                 fig.savefig(results_dir / f"lsv_{p}.png")
                 plt.close(fig)

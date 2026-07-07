@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 CONFIG_FILENAME = "pyflowbatt.toml"
 EIS_TAGS = ["pre", "pre-50%SOC", "post-50%SOC", "post"]
+DEFAULT_AREA_CM2 = 5.0  # fallback electrode area (cm^2) when no toml or BattINFO value exists
 _LSV_NUMBER_RE = re.compile(r"_(\d+)_LSV_")
 
 _TECHNIQUE_KEYS: dict[str, str] = {
@@ -52,6 +53,10 @@ class PyFlowBattConfig:
 
     Config files are loaded in ascending priority order: `~/pyflowbatt.toml`
     (lab-wide defaults), the parent folder, then the sample folder itself.
+
+    If ``area_cm2`` is left unset, PyFlowBatt.analysis.get_area_cm2 falls back to the
+    electrode area recorded in a BattINFO metadata file (if present) before finally
+    falling back to :data:`DEFAULT_AREA_CM2`.
     """
 
     gcpl_patterns: list[str] = field(default_factory=lambda: ["*_GCPL_*"])
@@ -64,7 +69,7 @@ class PyFlowBattConfig:
     sample_id_pattern: str = r"^\d+_.+_.+$"
     sample_id: str | None = None  # explicit name; overrides pattern entirely
     lsv_threshold: int = 8  # numeric cutoff for pre/post when only one LSV file is found
-    area_cm2: float = 5  # electrode area (cm^2) used to normalise LSV resistance
+    area_cm2: float | None = None  # explicit override; None lets BattINFO/default resolve it
 
     @classmethod
     def load(cls, folder: str | Path, *, home: Path | None = None) -> PyFlowBattConfig:
