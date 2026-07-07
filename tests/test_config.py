@@ -574,6 +574,178 @@ def test_area_cm2_passed_to_lsv_analyse(tmp_path: Path, monkeypatch: pytest.Monk
     assert captured_areas == [2.5, 2.5]
 
 
+def _cv_analyse_defaults() -> dict:
+    """Read the default kwarg values off cv.analyse's signature."""
+    import inspect
+
+    from PyFlowBatt import cv as cv_module
+
+    sig = inspect.signature(cv_module.analyse)
+    return {
+        name: param.default
+        for name, param in sig.parameters.items()
+        if param.default is not inspect.Parameter.empty
+    }
+
+
+def test_cv_config_defaults_match_cv_module() -> None:
+    """Without a pyflowbatt.toml, the [cv] settings match cv.analyse's own defaults."""
+    from PyFlowBatt import cv as cv_module
+
+    config = PyFlowBattConfig()
+    defaults = _cv_analyse_defaults()
+    assert config.cv_v_min == defaults["v_min"]
+    assert config.cv_v_max == defaults["v_max"]
+    assert config.cv_v_med == defaults["v_med"]
+    assert config.cv_v_range == defaults["v_range"]
+    assert config.cv_min_r2 == defaults["min_r2"] == cv_module.MIN_R2
+
+
+def test_cv_config_toml_override(tmp_path: Path) -> None:
+    """[cv] settings in pyflowbatt.toml override the defaults."""
+    sample_dir = tmp_path / "sample"
+    sample_dir.mkdir()
+    (sample_dir / "pyflowbatt.toml").write_text(
+        "[cv]\nv_min = 0.1\nv_max = 0.5\nv_med = 0.3\nv_range = 0.01\nmin_r2 = 0.9\n"
+    )
+
+    config = PyFlowBattConfig.load(sample_dir, home=tmp_path / "home")
+    assert config.cv_v_min == 0.1
+    assert config.cv_v_max == 0.5
+    assert config.cv_v_med == 0.3
+    assert config.cv_v_range == 0.01
+    assert config.cv_min_r2 == 0.9
+
+
+def test_cv_config_bad_value_ignored(tmp_path: Path) -> None:
+    """A non-numeric [cv] value is ignored, keeping the default, without affecting other keys."""
+    sample_dir = tmp_path / "sample"
+    sample_dir.mkdir()
+    (sample_dir / "pyflowbatt.toml").write_text('[cv]\nv_min = "not-a-number"\nv_max = 0.5\n')
+
+    config = PyFlowBattConfig.load(sample_dir, home=tmp_path / "home")
+    assert config.cv_v_min == 0.4004  # unchanged default
+    assert config.cv_v_max == 0.5  # valid override still applied
+
+
+def test_analyse_sample_passes_cv_config_to_cv_analyse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """analyse_sample threads the [cv] config values through to the real cv.analyse call."""
+    import pandas as pd
+
+    from PyFlowBatt import analysis as analysis_module
+
+    sample = tmp_path / "sample"
+    sample.mkdir()
+    (sample / "sample_CVApre_A.mpr").write_text("x")
+    (sample / "sample_CVApost_A.mpr").write_text("x")
+    (sample / "pyflowbatt.toml").write_text(
+        "[cv]\nv_min = 0.1\nv_max = 0.5\nv_med = 0.3\nv_range = 0.01\n"
+    )
+
+    captured_kwargs: list[dict] = []
+
+    def fake_analyse(filepath: Path, **kwargs: float) -> tuple[pd.DataFrame, pd.DataFrame, float]:
+        captured_kwargs.append(kwargs)
+        cv_df = pd.DataFrame({"CV Cycle": [1]})
+        df = pd.DataFrame({"CV Cycle / 1": [1]})
+        return df, cv_df, 1.0
+
+    def fake_plot(df: pd.DataFrame, cv_df: pd.DataFrame, min_r2: float = 0.8) -> tuple:
+        import matplotlib.pyplot as plt
+
+        return plt.subplots()
+
+    monkeypatch.setattr(analysis_module.cv, "analyse", fake_analyse)
+    monkeypatch.setattr(analysis_module.cv, "plot", fake_plot)
+
+    config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
+    analysis_module.analyse_sample(sample, save_format=None, config=config)
+
+    assert captured_kwargs == [
+        {"v_min": 0.1, "v_max": 0.5, "v_med": 0.3, "v_range": 0.01, "min_r2": 0.8},
+        {"v_min": 0.1, "v_max": 0.5, "v_med": 0.3, "v_range": 0.01, "min_r2": 0.8},
+    ]
+
+
+def test_summary_n_cycles_default() -> None:
+    """Without a pyflowbatt.toml, summary_n_cycles keeps the historical default list."""
+    config = PyFlowBattConfig()
+    assert config.summary_n_cycles == [10, 20, 30, 40, 50]
+
+
+def test_summary_n_cycles_toml_override(tmp_path: Path) -> None:
+    """summary_n_cycles in pyflowbatt.toml replaces the default list."""
+    sample_dir = tmp_path / "sample"
+    sample_dir.mkdir()
+    (sample_dir / "pyflowbatt.toml").write_text("summary_n_cycles = [5, 10]\n")
+
+    config = PyFlowBattConfig.load(sample_dir, home=tmp_path / "home")
+    assert config.summary_n_cycles == [5, 10]
+
+
+def test_summary_n_cycles_bad_value_ignored(tmp_path: Path) -> None:
+    """A non-list-of-numbers summary_n_cycles in pyflowbatt.toml is ignored."""
+    sample_dir = tmp_path / "sample"
+    sample_dir.mkdir()
+    (sample_dir / "pyflowbatt.toml").write_text('summary_n_cycles = ["a", "b"]\n')
+
+    config = PyFlowBattConfig.load(sample_dir, home=tmp_path / "home")
+    assert config.summary_n_cycles == [10, 20, 30, 40, 50]
+
+
+def test_analyse_sample_summary_uses_custom_n_cycles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """analyse_sample's summary sheet reports exactly the configured summary_n_cycles."""
+    import pandas as pd
+
+    from PyFlowBatt import analysis as analysis_module
+
+    sample = tmp_path / "sample"
+    sample.mkdir()
+    (sample / "sample_04_GCPL_A.mpr").write_text("x")
+    (sample / "pyflowbatt.toml").write_text("summary_n_cycles = [5, 10]\n")
+
+    cycle_counts = list(range(1, 15))
+    cycle_df = pd.DataFrame(
+        {
+            "Total Cycle Count / 1": cycle_counts,
+            "Coulombic Efficiency / %": [95.0] * len(cycle_counts),
+            "Energy Efficiency / %": [90.0] * len(cycle_counts),
+            "Voltage Efficiency / %": [94.0] * len(cycle_counts),
+            "Charge Capacity / mAh": [10.0] * len(cycle_counts),
+            "Discharge Capacity / mAh": [9.5] * len(cycle_counts),
+        }
+    )
+
+    def fake_gcpl_analyse(_filepaths: list) -> tuple[pd.DataFrame, pd.DataFrame]:
+        return pd.DataFrame({"Voltage / V": [0.0]}), cycle_df
+
+    def fake_gcpl_plot(_df: pd.DataFrame) -> tuple:
+        import matplotlib.pyplot as plt
+
+        return plt.subplots()
+
+    def fake_cycles_to_ratetest(_cycle_df: pd.DataFrame) -> pd.DataFrame:
+        return pd.DataFrame({"Times seen": [1]})
+
+    monkeypatch.setattr(analysis_module.gcpl, "analyse", fake_gcpl_analyse)
+    monkeypatch.setattr(analysis_module.gcpl, "plot", fake_gcpl_plot)
+    monkeypatch.setattr(analysis_module.gcpl, "cycles_to_ratetest", fake_cycles_to_ratetest)
+
+    config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
+    analysis_module.analyse_sample(sample, save_format=None, config=config)
+
+    df = pd.read_excel(sample / "results" / "summary.xlsx", sheet_name="Summary")
+    quantities = set(df["Quantity"])
+    assert "5 cycles avg. CE / %" in quantities
+    assert "10 cycles avg. CE / %" in quantities
+    assert "20 cycles avg. CE / %" not in quantities
+    assert "30 cycles avg. CE / %" not in quantities
+
+
 def test_cascade_priority(tmp_path: Path) -> None:
     """Test priority of settings.
 

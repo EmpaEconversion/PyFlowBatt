@@ -450,9 +450,10 @@ def analyse_sample(
                 v_max=config.cv_v_max,
                 v_med=config.cv_v_med,
                 v_range=config.cv_v_range,
+                min_r2=config.cv_min_r2,
             )
             df_save_bdf(df, results_dir / f"cv_{p}.x", save_format=save_format)
-            fig, _ax = cv.plot(df, cv_df)
+            fig, _ax = cv.plot(df, cv_df, min_r2=config.cv_min_r2)
             fig.savefig(results_dir / f"cv_{p}.png")
             plt.close(fig)
             if capacitance_mF:
@@ -524,7 +525,7 @@ def analyse_sample(
         "1st VE / %",
     ]
     # n cycles to include in the summary file
-    n_cycles = [10, 20, 30, 40, 50]
+    n_cycles = config.summary_n_cycles
     for n in n_cycles:
         cols.extend(
             [

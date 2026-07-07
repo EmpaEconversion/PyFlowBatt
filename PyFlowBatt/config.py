@@ -33,6 +33,7 @@ _CV_KEYS: dict[str, str] = {
     "v_max": "cv_v_max",
     "v_med": "cv_v_med",
     "v_range": "cv_v_range",
+    "min_r2": "cv_min_r2",
 }
 
 
@@ -63,12 +64,14 @@ class PyFlowBattConfig:
 
         area_cm2 = 3.14   # electrode area used to normalise LSV resistance
         assembled_resistance_ohm = 25000   # external resistor value used in the cell assembly
+        summary_n_cycles = [10, 20, 30, 40, 50]  # cycle counts reported in the summary sheet
 
         [cv]
         v_min = 0.4     # voltage window used to plot
         v_max = 0.6
         v_med = 0.5     # midpoint and range sampled to get currents from sweeps
         v_range = 0.02  # v_med +- v_range sampled
+        min_r2 = 0.8    # fit-quality gate below which capacitance isn't reported
 
     Config files are loaded in ascending priority order: `~/pyflowbatt.toml`
     (lab-wide defaults), the parent folder, then the sample folder itself.
@@ -99,6 +102,9 @@ class PyFlowBattConfig:
     cv_v_max: float = 0.6
     cv_v_med: float = 0.5
     cv_v_range: float = 0.02
+    cv_min_r2: float = 0.8  # fit-quality gate below which CV capacitance isn't reported
+    # cycle counts reported in the summary sheet (N cycles avg. CE/EE/VE/capacity)
+    summary_n_cycles: list[int] = field(default_factory=lambda: [10, 20, 30, 40, 50])
 
     @classmethod
     def load(cls, folder: str | Path, *, home: Path | None = None) -> PyFlowBattConfig:
@@ -197,6 +203,15 @@ class PyFlowBattConfig:
             else:
                 logger.warning(
                     "Ignoring bad assembled_resistance_ohm in %s (expected number)", path
+                )
+
+        if "summary_n_cycles" in data:
+            values = data["summary_n_cycles"]
+            if isinstance(values, list) and all(_is_number(v) for v in values):
+                self.summary_n_cycles = [int(v) for v in values]
+            else:
+                logger.warning(
+                    "Ignoring bad summary_n_cycles in %s (expected list of numbers)", path
                 )
 
         cv = data.get("cv", {})
