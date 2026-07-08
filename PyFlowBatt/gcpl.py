@@ -18,15 +18,44 @@ from PyFlowBatt.read import read_to_bdf
 logger = logging.getLogger(__name__)
 
 
-def plot(df: pd.DataFrame) -> tuple[Figure, Axes]:
+def plot(df: pd.DataFrame, cycle_df: pd.DataFrame) -> tuple[Figure, list[Axes]]:
     """Plot time series data."""
-    fig, ax = plt.subplots()
+    fig, axs = plt.subplots(nrows=5, figsize=(8, 10))
     df = df.reset_index()
-    ax.plot((df["Unix Time / s"] - df["Unix Time / s"].iloc[0]) / 3600, df["Voltage / V"])
-    ax.set_xlabel("Time / h")
-    ax.set_ylabel("Voltage / V")
+
+    kw_chg = {"color": "C1", "marker": "o", "label": "Charging"}
+    kw_dchg = {"color": "C1", "marker": "o", "label": "Discharging", "markerfacecolor": "w"}
+    kw_echg = {"color": "C2", "marker": "s", "label": "Charging"}
+    kw_edchg = {"color": "C2", "marker": "s", "label": "Discharging", "markerfacecolor": "w"}
+    kw_ce = {"color": "C3", "marker": "D", "label": "Coulombic"}
+    kw_ve = {"color": "C4", "marker": "v", "label": "Voltage"}
+
+    axs[0].plot((df["Unix Time / s"] - df["Unix Time / s"].iloc[0]) / 3600, df["Voltage / V"])
+    axs[0].set_xlabel("Time / h")
+    axs[0].set_ylabel("Voltage / V")
+
+    axs[1].plot(cycle_df["Cycle Count / 1"], cycle_df["Charge Capacity / mAh"], **kw_chg)
+    axs[1].plot(cycle_df["Cycle Count / 1"], cycle_df["Discharge Capacity / mAh"], **kw_dchg)
+    axs[1].set_xlabel("Cycle Count / 1")
+    axs[1].set_ylabel("Capacity / mAh")
+    axs[1].legend()
+
+    axs[2].plot(cycle_df["Cycle Count / 1"], cycle_df["Charge Energy / mWh"], **kw_echg)
+    axs[2].plot(cycle_df["Cycle Count / 1"], cycle_df["Discharge Energy / mWh"], **kw_edchg)
+    axs[2].set_xlabel("Cycle Count / 1")
+    axs[2].set_ylabel("Energy / mWh")
+    axs[2].legend()
+
+    axs[3].plot(cycle_df["Cycle Count / 1"], cycle_df["Coulombic Efficiency / %"], **kw_ce)
+    axs[3].set_xlabel("Cycle Count / 1")
+    axs[3].set_ylabel("Coulombic\nEfficiency / %")
+
+    axs[4].plot(cycle_df["Cycle Count / 1"], cycle_df["Voltage Efficiency / %"], **kw_ve)
+    axs[4].set_xlabel("Cycle Count / 1")
+    axs[4].set_ylabel("Voltage\nEfficiency / %")
+
     fig.tight_layout()
-    return fig, ax
+    return fig, axs
 
 
 def analyse(filepaths: str | Path | list[str | Path]) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -36,6 +65,7 @@ def analyse(filepaths: str | Path | list[str | Path]) -> tuple[pd.DataFrame, pd.
     dfs = []
     cycle_dfs = []
     total_cycles = 0
+    total_steps = 0
 
     # Read all the files
     dfs = [read_to_bdf(file) for file in filepaths]
@@ -52,6 +82,9 @@ def analyse(filepaths: str | Path | list[str | Path]) -> tuple[pd.DataFrame, pd.
             continue
         df["Total Cycle Count / 1"] = df["Cycle Count / 1"] + total_cycles
         total_cycles = df["Total Cycle Count / 1"].max()
+
+        df["Total Step Count / 1"] = df["Step Count / 1"] + total_steps
+        total_steps = df["Total Step Count / 1"].max()
 
         # Create dataframe with just cycle information
         cycle_df = df.groupby("Cycle Count / 1").first().index.to_frame()
@@ -105,6 +138,17 @@ def analyse(filepaths: str | Path | list[str | Path]) -> tuple[pd.DataFrame, pd.
     df = pd.concat(dfs)
     cycle_df = pd.concat(cycle_dfs)
 
+    # Rename total cycles to cycles
+    df = df.drop(columns="Cycle Count / 1").rename(
+        columns={"Total Cycle Count / 1": "Cycle Count / 1"}
+    )
+    df = df.drop(columns="Step Count / 1").rename(
+        columns={"Total Step Count / 1": "Step Count / 1"}
+    )
+    cycle_df = cycle_df.drop(columns="Cycle Count / 1").rename(
+        columns={"Total Cycle Count / 1": "Cycle Count / 1"}
+    )
+
     return df, cycle_df
 
 
@@ -120,7 +164,7 @@ def cycles_to_ratetest(cycle_df: pd.DataFrame) -> pd.DataFrame:
     ratetest_df = cycle_df.groupby(current_groups).agg(
         {
             "Average Current / A": ["mean"],
-            "Total Cycle Count / 1": ["first", "last"],
+            "Cycle Count / 1": ["first", "last"],
             "Discharge Capacity / mAh": ["mean", "std"],
             "Charge Capacity / mAh": ["mean", "std"],
             "Discharge Energy / mWh": ["mean", "std"],
@@ -151,7 +195,7 @@ def cycles_to_ratetest(cycle_df: pd.DataFrame) -> pd.DataFrame:
     return ratetest_df.rename(
         columns={
             "Average Current / A mean": "Average Current / A",
-            "Total Cycle Count / 1 first": "First cycle",
-            "Total Cycle Count / 1 last": "Last cycle",
+            "Cycle Count / 1 first": "First cycle",
+            "Cycle Count / 1 last": "Last cycle",
         },
     )

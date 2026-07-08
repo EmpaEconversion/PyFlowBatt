@@ -393,7 +393,7 @@ def analyse_sample(
         logger.warning("- ☹️ No GCPL files found, skipping")
     else:
         df, cycle_df = gcpl.analyse([gcpl_file])
-        fig, _ax = gcpl.plot(df)
+        fig, _ax = gcpl.plot(df, cycle_df)
         fig.savefig(results_dir / "gcpl.png")
         plt.close(fig)
         ratetest_df = gcpl.cycles_to_ratetest(cycle_df)
@@ -560,7 +560,7 @@ def analyse_sample(
     )
 
     if cycle_df is not None:
-        mask = cycle_df["Total Cycle Count / 1"] == 1
+        mask = cycle_df["Cycle Count / 1"] == 1
         summary["1st CE / %"]["Value"] = float(
             cycle_df.loc[mask, "Coulombic Efficiency / %"].to_numpy()[0]
         )
@@ -571,10 +571,10 @@ def analyse_sample(
             cycle_df.loc[mask, "Voltage Efficiency / %"].to_numpy()[0]
         )
 
-        max_cycles = cycle_df["Total Cycle Count / 1"].max()
+        max_cycles = cycle_df["Cycle Count / 1"].max()
         for n in n_cycles:
             if n <= max_cycles:
-                mask = cycle_df["Total Cycle Count / 1"] <= n
+                mask = cycle_df["Cycle Count / 1"] <= n
                 summary[f"{n} cycles avg. CE / %"]["Value"] = float(
                     cycle_df.loc[mask, "Coulombic Efficiency / %"].mean()
                 )

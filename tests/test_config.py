@@ -741,7 +741,7 @@ def test_analyse_sample_summary_uses_custom_n_cycles(
     cycle_counts = list(range(1, 15))
     cycle_df = pd.DataFrame(
         {
-            "Total Cycle Count / 1": cycle_counts,
+            "Cycle Count / 1": cycle_counts,
             "Coulombic Efficiency / %": [95.0] * len(cycle_counts),
             "Energy Efficiency / %": [90.0] * len(cycle_counts),
             "Voltage Efficiency / %": [94.0] * len(cycle_counts),
@@ -753,7 +753,7 @@ def test_analyse_sample_summary_uses_custom_n_cycles(
     def fake_gcpl_analyse(_filepaths: list) -> tuple[pd.DataFrame, pd.DataFrame]:
         return pd.DataFrame({"Voltage / V": [0.0]}), cycle_df
 
-    def fake_gcpl_plot(_df: pd.DataFrame) -> tuple:
+    def fake_gcpl_plot(_df: pd.DataFrame, _cycle_df: pd.DataFrame) -> tuple:
         import matplotlib.pyplot as plt
 
         return plt.subplots()
