@@ -6,7 +6,7 @@ from pathlib import Path
 
 from rocrate.rocrate import ROCrate
 
-from pyflowbatt.analysis import get_sampleid_from_folderpath
+from pyflowbatt.analysis import _rel, get_sampleid_from_folderpath
 from pyflowbatt.config import PyFlowBattConfig, classify_technique_files
 
 MEASUREMENT_LABELS: dict[str, str] = {
@@ -62,11 +62,6 @@ def _classify_inputs(
     """
     config = config or PyFlowBattConfig.load(sample_folder)
     return classify_technique_files(sample_folder, config)
-
-
-def _rel(path: Path, root: Path) -> str:
-    """Return a forward-slash relative path string from root."""
-    return path.relative_to(root).as_posix()
 
 
 def write_rocrate(

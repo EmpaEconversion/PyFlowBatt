@@ -1,5 +1,6 @@
 """Tests for pyflowbatt.toml configuration and technique file classification."""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -244,6 +245,138 @@ def test_analyse_sample_raises_on_toml_battinfo_conflict(
     config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
     with pytest.raises(ValueError, match="Sample name mismatch"):
         analysis_module.analyse_sample(sample, save_format=None, config=config)
+
+
+def _all_ids(obj: object) -> set[str]:
+    """Recursively collect every "@id" string value in a JSON-LD-like structure."""
+    found: set[str] = set()
+    if isinstance(obj, dict):
+        id_value = obj.get("@id")
+        if isinstance(id_value, str):
+            found.add(id_value)
+        for v in obj.values():
+            found |= _all_ids(v)
+    elif isinstance(obj, list):
+        for item in obj:
+            found |= _all_ids(item)
+    return found
+
+
+def _fake_convert(_file: Path) -> dict:
+    return {
+        "@context": {},
+        "@type": "RedoxFlowBattery",
+        "schema:productID": "empa__fcid123456",
+        "schema:name": "battinfo-derived-name",
+    }
+
+
+def test_analyse_sample_battinfo_ids_are_root_relative_not_sample_relative(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BattINFO @id file paths are relative to root_folder, not the sample folder."""
+    from pyflowbatt import analysis as analysis_module
+
+    root = tmp_path / "project"
+    sample = root / "sample_01"
+    sample.mkdir(parents=True)
+    (sample / "metadata.xlsx").write_text("x")
+
+    monkeypatch.setattr(analysis_module, "convert_excel_to_jsonld", _fake_convert)
+
+    config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
+    analysis_module.analyse_sample(
+        sample,
+        save_format=None,
+        config=config,
+        root_folder=root,
+        pub_info={"zenodo_doi_url": "https://doi.org/10.5281/zenodo.20338409"},
+    )
+
+    metadata = json.loads((sample / "metadata.empa__fcid123456.json").read_text())
+    ids = _all_ids(metadata)
+    assert any(i.endswith("#sample_01/metadata.xlsx") for i in ids)
+    assert not any(i.endswith("#metadata.xlsx") for i in ids)
+
+
+def test_analyse_sample_zip_package_id_points_at_zip_with_path_fragment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Default package="zip": @id is the zip's Zenodo download URL, path as a fragment."""
+    from pyflowbatt import analysis as analysis_module
+
+    root = tmp_path / "project"
+    sample = root / "sample_01"
+    sample.mkdir(parents=True)
+    (sample / "metadata.xlsx").write_text("x")
+
+    monkeypatch.setattr(analysis_module, "convert_excel_to_jsonld", _fake_convert)
+
+    config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
+    analysis_module.analyse_sample(
+        sample,
+        save_format=None,
+        config=config,
+        root_folder=root,
+        pub_info={"zenodo_doi_url": "https://doi.org/10.5281/zenodo.20338409"},
+    )
+
+    metadata = json.loads((sample / "metadata.empa__fcid123456.json").read_text())
+    ids = _all_ids(metadata)
+    expected = "https://zenodo.org/records/20338409/files/project.zip#sample_01/metadata.xlsx"
+    assert expected in ids
+
+
+def test_analyse_sample_files_package_id_is_direct_download_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """package="files": @id is a direct per-file Zenodo download URL, no zip involved."""
+    from pyflowbatt import analysis as analysis_module
+
+    root = tmp_path / "project"
+    sample = root / "sample_01"
+    sample.mkdir(parents=True)
+    (sample / "metadata.xlsx").write_text("x")
+
+    monkeypatch.setattr(analysis_module, "convert_excel_to_jsonld", _fake_convert)
+
+    config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
+    analysis_module.analyse_sample(
+        sample,
+        save_format=None,
+        config=config,
+        root_folder=root,
+        pub_info={
+            "zenodo_doi_url": "https://doi.org/10.5281/zenodo.20338409",
+            "zenodo_package": "files",
+        },
+    )
+
+    metadata = json.loads((sample / "metadata.empa__fcid123456.json").read_text())
+    ids = _all_ids(metadata)
+    expected = "https://zenodo.org/records/20338409/files/sample_01/metadata.xlsx"
+    assert expected in ids
+
+
+def test_analyse_sample_no_zenodo_url_keeps_bare_relative_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no zenodo_doi_url yet, @id stays a plain root-relative path (no fake URL)."""
+    from pyflowbatt import analysis as analysis_module
+
+    root = tmp_path / "project"
+    sample = root / "sample_01"
+    sample.mkdir(parents=True)
+    (sample / "metadata.xlsx").write_text("x")
+
+    monkeypatch.setattr(analysis_module, "convert_excel_to_jsonld", _fake_convert)
+
+    config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
+    analysis_module.analyse_sample(sample, save_format=None, config=config, root_folder=root)
+
+    metadata = json.loads((sample / "metadata.empa__fcid123456.json").read_text())
+    ids = _all_ids(metadata)
+    assert "sample_01/metadata.xlsx" in ids
 
 
 def test_sample_id_custom_pattern(tmp_path: Path) -> None:

@@ -252,6 +252,11 @@ def get_area_cm2(config: PyFlowBattConfig, raw_battinfo_json: dict | None = None
     return DEFAULT_AREA_CM2
 
 
+def _rel(path: Path, root: Path) -> str:
+    """Return a forward-slash relative path string from root."""
+    return path.relative_to(root).as_posix()
+
+
 def df_save_bdf(df: pd.DataFrame, filepath: Path, save_format: SAVE_FORMATS = "parquet") -> None:
     """Save df to file."""
     if save_format is None:
@@ -272,14 +277,21 @@ def analyse_sample(
     pub_info: dict | None = None,
     save_format: SAVE_FORMATS = "parquet",
     config: PyFlowBattConfig | None = None,
+    root_folder: str | Path | None = None,
 ) -> tuple[dict[str, list[Path]], dict[str, list[Path]], str | None, str]:
     """Read all the files in a folder, analayse and plot everything.
 
     Without an explicit config, loads a ``pyflowbatt.toml`` cascade (home directory,
     parent folder, sample folder) to customise technique glob patterns and sample ID
     detection.
+
+    ``root_folder`` is the top-level folder that will be uploaded to Zenodo (defaults
+    to ``folder`` itself). BattINFO metadata file paths are recorded relative to it, so
+    that when there are multiple sample folders under one root, "@id"s stay unambiguous
+    and match where the file actually sits once the root folder is packaged for Zenodo.
     """
     folder = Path(folder)
+    root_folder = Path(root_folder) if root_folder is not None else folder
     pub_info = pub_info or {}
     fcid: str | None = None
     config = config or PyFlowBattConfig.load(folder)
@@ -341,32 +353,37 @@ def analyse_sample(
             battinfo_sample_id = raw_json["schema:name"]
             raw_battinfo_json = raw_json
             battinfo_json = battinfo.make_test_object(raw_json)
-            battinfo_json = battinfo.merge_jsonld_on_type(
-                [battinfo_json, battinfo.add_input_and_output()],
-            )
-            if pub_info and pub_info.get("citation_string"):
-                battinfo_json = battinfo.merge_jsonld_on_type(
-                    [battinfo_json, battinfo.add_citation(pub_info["citation_string"])]
-                )
-            if pub_info and pub_info.get("authors") and pub_info.get("institutions"):
-                battinfo_json = battinfo.merge_jsonld_on_type(
-                    [
-                        battinfo_json,
+
+            # Create list of everything that can be included in JSON-LD
+            merge_list = [battinfo_json, battinfo.add_input_and_output()]
+            if pub_info:
+                if pub_info.get("zenodo_doi_url"):
+                    merge_list.append(battinfo.add_zenodo_url(pub_info["zenodo_doi_url"]))
+                if pub_info.get("citation_string"):
+                    merge_list.append(battinfo.add_citation(pub_info["citation_string"]))
+                if pub_info.get("institution"):
+                    merge_list.append(
+                        battinfo.add_institution(
+                            pub_info["institution"],
+                            pub_info.get("institutions", {}).get(pub_info["institution"]),
+                        )
+                    )
+                if pub_info.get("authors") and pub_info.get("institutions"):
+                    merge_list.append(
                         battinfo.add_authors(pub_info["authors"], pub_info["institutions"]),
-                    ]
-                )
-            if pub_info and pub_info.get("sample_to_fig"):
-                battinfo_json = battinfo.merge_jsonld_on_type(
-                    [
-                        battinfo_json,
+                    )
+                if pub_info.get("sample_to_fig"):
+                    merge_list.append(
                         battinfo.add_associated_media(
                             pub_info.get("publication_doi_url"),
                             pub_info["sample_to_fig"],
                             fcid,
                             battinfo_sample_id,
                         ),
-                    ]
-                )
+                    )
+
+            # Merge everything
+            battinfo_json = battinfo.merge_jsonld_on_type(merge_list)
             break
         else:
             logger.info("- ☹️ Couldn't convert battinfo xlsx")
@@ -648,33 +665,43 @@ def analyse_sample(
 
     if battinfo_json is not None:
         zenodo_url = pub_info.get("zenodo_doi_url") if pub_info else None
+        zenodo_package = pub_info.get("zenodo_package") or "zip"
+        zenodo_zip_filename = pub_info.get("zenodo_zip_filename") or f"{root_folder.name}.zip"
         for label, paths in tracked_mpr_inputs.items():
             for path in paths:
                 snippet = battinfo.add_data(
-                    path.relative_to(folder).as_posix(),
+                    _rel(path, root_folder),
                     zenodo_url,
                     extras={"rdfs:comment": MPR_DESCRIPTIONS.get(label)},
+                    package=zenodo_package,
+                    zip_filename=zenodo_zip_filename,
                 )
                 battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
         for path in mps_files:
             snippet = battinfo.add_input_data(
-                path.relative_to(folder).as_posix(),
+                _rel(path, root_folder),
                 zenodo_url,
                 "EC-Lab measurement protocol (.mps)",
+                package=zenodo_package,
+                zip_filename=zenodo_zip_filename,
             )
             battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
         if battinfo_xlsx_path:
             snippet = battinfo.add_input_data(
-                battinfo_xlsx_path.relative_to(folder).as_posix(),
+                _rel(battinfo_xlsx_path, root_folder),
                 zenodo_url,
                 "BattINFO converter Excel metadata input",
+                package=zenodo_package,
+                zip_filename=zenodo_zip_filename,
             )
             battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
         for label_paths in tracked_outputs.values():
             for path in label_paths:
-                rel = path.relative_to(folder).as_posix()
+                rel = _rel(path, root_folder)
                 with contextlib.suppress(ValueError):
-                    snippet = battinfo.add_data(rel, zenodo_url)
+                    snippet = battinfo.add_data(
+                        rel, zenodo_url, package=zenodo_package, zip_filename=zenodo_zip_filename
+                    )
                     battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
         metadata_path = folder / f"metadata.{fcid or sample_id}.json"
         with metadata_path.open("w") as mf:
@@ -834,6 +861,7 @@ def analyse_all_samples(
             save_format=save_format,
             pub_info=pub_info,
             config=configs_by_sample_folder[sample_folder],
+            root_folder=folder,
         )
 
     if len(sample_folders) > 1:
