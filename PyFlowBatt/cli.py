@@ -4,7 +4,6 @@ import argparse
 import logging
 from pathlib import Path
 
-from PyFlowBatt.analysis import analyse_all_samples, dry_analyse_all_samples
 from PyFlowBatt.config import CONFIG_FILENAME, write_template_config
 
 
@@ -32,6 +31,8 @@ def analyse(
     max_search_depth: int = 6,
 ) -> None:
     """Run PyFlowBatt on a folder."""
+    from PyFlowBatt.analysis import analyse_all_samples, dry_analyse_all_samples  # noqa: PLC0415
+
     folderpath = Path.cwd() if not folder else Path(folder)
     logger = logging.getLogger("PyFlowBatt")
     logger.addHandler(logging.StreamHandler())
