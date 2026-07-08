@@ -753,7 +753,7 @@ def test_analyse_sample_summary_uses_custom_n_cycles(
     def fake_gcpl_analyse(_filepaths: list) -> tuple[pd.DataFrame, pd.DataFrame]:
         return pd.DataFrame({"Voltage / V": [0.0]}), cycle_df
 
-    def fake_gcpl_plot(_df: pd.DataFrame) -> tuple:
+    def fake_gcpl_plot(_df: pd.DataFrame, _cycle_df: pd.DataFrame) -> tuple:
         import matplotlib.pyplot as plt
 
         return plt.subplots()
