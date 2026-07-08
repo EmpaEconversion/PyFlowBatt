@@ -28,7 +28,9 @@ def _read_lsv(filepath: Path | str) -> pd.DataFrame:
     return df
 
 
-def analyse(filepath: Path | str) -> tuple[pd.DataFrame, dict[str, float | str]]:
+def analyse(
+    filepath: Path | str, area_cm2: float = 5
+) -> tuple[pd.DataFrame, dict[str, float | str]]:
     """Extract data from LSV, fit a straight line to get resistance."""
     # Read file to df
     df = _read_lsv(filepath)
@@ -40,7 +42,6 @@ def analyse(filepath: Path | str) -> tuple[pd.DataFrame, dict[str, float | str]]
     y = df["Current / A"][mask]
     slope, intercept = np.polyfit(x, y, 1)
     resistance_ohm = 1 / slope
-    area_cm2 = 5
     specific_resistance_ohm_cm2 = resistance_ohm * area_cm2
     results = {
         "Fit cutoff current / A": cutoff_current,

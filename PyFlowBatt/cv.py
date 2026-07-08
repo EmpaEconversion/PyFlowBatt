@@ -52,6 +52,7 @@ def analyse(
     v_max: float = 0.6,
     v_med: float = 0.5,
     v_range: float = 0.02,
+    min_r2: float = MIN_R2,
 ) -> tuple[pd.DataFrame, pd.DataFrame, float | None]:
     """Analyse cyclic voltammetry data, find capacitance from scan-rate vs current difference."""
     df = read_to_bdf(filepath)
@@ -112,15 +113,15 @@ def analyse(
     # Only take data after the first step
     full_mask = (df["Step Count / 1"] >= 2) & full_mask
 
-    if r2 < MIN_R2:
+    if r2 < min_r2:
         logger.warning(
-            "CV fit R² value is very low (%.3f<%s), not reporting capacitance", r2, MIN_R2
+            "CV fit R² value is very low (%.3f<%s), not reporting capacitance", r2, min_r2
         )
         return df[full_mask], cv_df, None
     return df[full_mask], cv_df, capacitance_mF
 
 
-def plot(df: pd.DataFrame, cv_df: pd.DataFrame) -> tuple[Figure, Axes]:
+def plot(df: pd.DataFrame, cv_df: pd.DataFrame, min_r2: float = MIN_R2) -> tuple[Figure, Axes]:
     """Plot cyclic voltammetry data."""
     fig, ax = plt.subplots(ncols=2)
     min_sweep = min(cv_df["Scan rate / V s⁻¹"])
@@ -153,14 +154,14 @@ def plot(df: pd.DataFrame, cv_df: pd.DataFrame) -> tuple[Figure, Axes]:
     ax[1].set_ylabel("∆I/2 / A")
 
     m, c, r2 = _get_capacitance_from_cv(cv_df)
-    if r2 > MIN_R2:
+    if r2 > min_r2:
         label = "Fit"
         style = "k-"
         r2_text = f"R² = {r2:.3f}"
     else:
         label = "Fit (bad)"
         style = "k--"
-        r2_text = f"R² = {r2:.3f}\n(<0.8, result ignored)"
+        r2_text = f"R² = {r2:.3f}\n(<{min_r2}, result ignored)"
     ax[1].plot(cv_df["Scan rate / V s⁻¹"], m * cv_df["Scan rate / V s⁻¹"] + c, style, label=label)
     ax[1].legend()
     ax[1].text(0.95, 0.05, r2_text, transform=ax[1].transAxes, ha="right", va="bottom")

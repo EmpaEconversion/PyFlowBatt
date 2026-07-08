@@ -589,8 +589,8 @@ def add_zenodo_url(
 def add_associated_media(
     paper_doi_url: str | None,
     sample_to_fig: dict,
-    ccid: str,
-    sample_id: str,
+    ccid: str | None,
+    sample_id: str | None,
 ) -> dict:
     """Add associated media to output section of json-ld output."""
     figs = [

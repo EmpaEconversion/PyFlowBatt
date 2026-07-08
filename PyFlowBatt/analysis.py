@@ -13,6 +13,7 @@ import pandas as pd
 from battinfoconverter_backend import convert_excel_to_jsonld
 
 from PyFlowBatt import battinfo, cv, eis, gcpl, lsv, ocv
+from PyFlowBatt.config import DEFAULT_AREA_CM2, EIS_TAGS, PyFlowBattConfig, classify_technique_files
 from PyFlowBatt.read import read_to_bdf
 
 logger = logging.getLogger(__name__)
@@ -54,13 +55,116 @@ def get_res_from_filename(s: str) -> float:
     return np.nan
 
 
-def get_sampleid_from_folderpath(folderpath: str | Path) -> str:
-    """Get the sample ID given a folder to a sample.
+_RESISTANCE_UNIT_MULTIPLIERS = {
+    "ohm": 1.0,
+    "kiloohm": 1e3,
+    "megaohm": 1e6,
+}
 
-    Usually it is just the folder name, sometimes the parent.
+
+def _resistance_unit_multiplier(unit: str) -> float | None:
+    """Ohms-per-unit multiplier for a BattINFO resistance unit string.
+
+    Accepts both the qudt-style ``unit:OHM``/``unit:KiloOHM``/``unit:MegaOHM`` and the
+    bare ``Ohm``/``KiloOhm``/``MegaOhm`` forms seen in different BattINFO converter versions.
+    """
+    return _RESISTANCE_UNIT_MULTIPLIERS.get(unit.removeprefix("unit:").lower())
+
+
+def _extract_assembled_resistance_ohm(raw_battinfo_json: dict) -> float | None:
+    """Extract an assembled/external resistance (ohms) from a raw BattINFO jsonld dict."""
+    properties = raw_battinfo_json.get("hasMeasuredProperty") or []
+    if isinstance(properties, dict):
+        properties = [properties]
+    for prop in properties:
+        if not isinstance(prop, dict) or prop.get("@type") != "ElectricResistance":
+            continue
+        unit = prop.get("hasMeasurementUnit")
+        multiplier = _resistance_unit_multiplier(unit) if isinstance(unit, str) else None
+        if multiplier is None:
+            logger.warning(
+                "Ignoring ElectricResistance with unrecognized unit %s in BattINFO file", unit
+            )
+            continue
+        raw_value = prop.get("hasNumericalPart", {}).get("hasNumberValue")
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            continue
+        return value * multiplier
+    return None
+
+
+def get_assembled_resistance_ohm(
+    config: PyFlowBattConfig,
+    raw_battinfo_json: dict | None = None,
+    fallback_filename: str | None = None,
+) -> float:
+    """Resolve the assembled/external resistance (ohms) for the "Assembled resistance" summary.
+
+    Resolved in priority order: an explicit ``assembled_resistance_ohm`` set in
+    pyflowbatt.toml, then an ``ElectricResistance`` measurement in a BattINFO file, then a
+    value parsed out of ``fallback_filename`` (e.g. ``..._25kOhm_...``) via
+    :func:`get_res_from_filename`.
+
+    Raises ``ValueError`` if pyflowbatt.toml sets ``assembled_resistance_ohm`` and a
+    BattINFO-derived value is also available and the two disagree.
+    """
+    battinfo_value = (
+        _extract_assembled_resistance_ohm(raw_battinfo_json)
+        if raw_battinfo_json is not None
+        else None
+    )
+
+    if config.assembled_resistance_ohm is not None:
+        if battinfo_value is not None and battinfo_value != config.assembled_resistance_ohm:
+            msg = (
+                "Assembled resistance mismatch: pyflowbatt.toml sets assembled_resistance_ohm="
+                f"{config.assembled_resistance_ohm} but the BattINFO file gives "
+                f"{battinfo_value} ohm"
+            )
+            raise ValueError(msg)
+        return config.assembled_resistance_ohm
+
+    if battinfo_value is not None:
+        return battinfo_value
+
+    if fallback_filename is not None:
+        return get_res_from_filename(fallback_filename)
+
+    return np.nan
+
+
+def get_sampleid_from_folderpath(
+    folderpath: str | Path,
+    config: PyFlowBattConfig | None = None,
+    battinfo_name: str | None = None,
+) -> str:
+    """Get the sample ID for a sample folder.
+
+    Resolved in priority order: an explicit ``sample_name`` set in pyflowbatt.toml, then
+    the sample name from a BattINFO file (pass it as ``battinfo_name``), then a name
+    derived from the folder path (usually the folder name, sometimes the parent).
+
+    Raises ``ValueError`` if pyflowbatt.toml sets an explicit ``sample_name`` and a
+    ``battinfo_name`` is also given and the two disagree.
     """
     folderpath = Path(folderpath)
-    pattern = r"^\d+_.+_.+$"
+    config = config or PyFlowBattConfig.load(folderpath)
+
+    if config.sample_name is not None:
+        if battinfo_name is not None and battinfo_name != config.sample_name:
+            msg = (
+                f"Sample name mismatch for {folderpath}: pyflowbatt.toml sets sample_name "
+                f"'{config.sample_name}' but the BattINFO file gives '{battinfo_name}'"
+            )
+            raise ValueError(msg)
+        return config.sample_name
+
+    if battinfo_name is not None:
+        return battinfo_name
+
+    pattern = config.sample_name_pattern
     # Sample ID has format [digits]_[somethingelse]_[somethingelse]
     # e.g. 250115_reda_1M-blahblahblah
     if re.match(pattern=pattern, string=folderpath.stem):
@@ -72,6 +176,80 @@ def get_sampleid_from_folderpath(folderpath: str | Path) -> str:
         pass
     logger.warning("Could not find sample ID in %s", folderpath)
     return "Unknown sample"
+
+
+def _extract_electrode_area_cm2(raw_battinfo_json: dict, electrode_key: str) -> float | None:
+    """Extract a Substrate Area (cm^2) for one electrode from a raw BattINFO jsonld dict.
+
+    ``electrode_key`` is ``"hasPositiveElectrode"`` or ``"hasNegativeElectrode"``.
+    """
+    electrode = raw_battinfo_json.get(electrode_key)
+    if not isinstance(electrode, dict):
+        return None
+    substrate = electrode.get("Substrate")
+    if not isinstance(substrate, dict):
+        return None
+    properties = substrate.get("hasMeasuredProperty") or []
+    if isinstance(properties, dict):
+        properties = [properties]
+    for prop in properties:
+        if not isinstance(prop, dict) or prop.get("@type") != "Area":
+            continue
+        unit = prop.get("hasMeasurementUnit")
+        if unit != "unit:CentiM2":
+            logger.warning(
+                "Ignoring %s Area with unit %s in BattINFO file (expected unit:CentiM2)",
+                electrode_key,
+                unit,
+            )
+            continue
+        value = prop.get("hasNumericalPart", {}).get("hasNumberValue")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+    return None
+
+
+def get_area_cm2(config: PyFlowBattConfig, raw_battinfo_json: dict | None = None) -> float:
+    """Resolve the electrode area (cm^2) used to normalise LSV resistance.
+
+    Resolved in priority order: an explicit ``area_cm2`` set in pyflowbatt.toml, then the
+    BattINFO file's positive/negative electrode Substrate Area (if both are present and
+    disagree, the smaller is used), then :data:`PyFlowBatt.config.DEFAULT_AREA_CM2`.
+
+    Raises ``ValueError`` if pyflowbatt.toml sets ``area_cm2`` and a BattINFO-derived area
+    is also available and the two disagree.
+    """
+    battinfo_area: float | None = None
+    if raw_battinfo_json is not None:
+        pos = _extract_electrode_area_cm2(raw_battinfo_json, "hasPositiveElectrode")
+        neg = _extract_electrode_area_cm2(raw_battinfo_json, "hasNegativeElectrode")
+        if pos is not None and neg is not None:
+            if pos != neg:
+                logger.warning(
+                    "Positive (%.4g cm2) and negative (%.4g cm2) electrode areas disagree "
+                    "in BattINFO file; using the smaller",
+                    pos,
+                    neg,
+                )
+            battinfo_area = min(pos, neg)
+        elif pos is not None:
+            battinfo_area = pos
+        elif neg is not None:
+            battinfo_area = neg
+
+    if config.area_cm2 is not None:
+        if battinfo_area is not None and battinfo_area != config.area_cm2:
+            msg = (
+                f"Electrode area mismatch: pyflowbatt.toml sets area_cm2={config.area_cm2} "
+                f"but the BattINFO file gives {battinfo_area} cm2"
+            )
+            raise ValueError(msg)
+        return config.area_cm2
+
+    if battinfo_area is not None:
+        return battinfo_area
+
+    return DEFAULT_AREA_CM2
 
 
 def df_save_bdf(df: pd.DataFrame, filepath: Path, save_format: SAVE_FORMATS = "parquet") -> None:
@@ -89,28 +267,43 @@ def df_save_bdf(df: pd.DataFrame, filepath: Path, save_format: SAVE_FORMATS = "p
 
 
 def analyse_sample(
-    folder: str | Path, *, pub_info: dict | None = None, save_format: SAVE_FORMATS = "parquet"
-) -> tuple[dict[str, list[Path]], dict[str, list[Path]], str | None]:
-    """Read all the files in a folder, analayse and plot everything."""
+    folder: str | Path,
+    *,
+    pub_info: dict | None = None,
+    save_format: SAVE_FORMATS = "parquet",
+    config: PyFlowBattConfig | None = None,
+) -> tuple[dict[str, list[Path]], dict[str, list[Path]], str | None, str]:
+    """Read all the files in a folder, analayse and plot everything.
+
+    Without an explicit config, loads a ``pyflowbatt.toml`` cascade (home directory,
+    parent folder, sample folder) to customise technique glob patterns and sample ID
+    detection.
+    """
     folder = Path(folder)
     pub_info = pub_info or {}
     fcid: str | None = None
+    config = config or PyFlowBattConfig.load(folder)
 
     logger.info("\n🌊 PyFlowBatt-ing %s", folder.name)
-    gcpl_files = list(folder.glob("*_GCPL_*.mpr"))
-    gcpl_file = max(gcpl_files, key=lambda x: x.stat().st_size) if gcpl_files else None
-    ocv_files = list(folder.glob("*_OCV_*.mpr"))
-    lsv_files = list(folder.glob("*_LSV_*.mpr"))
-    cv_files_before = list(folder.glob("*_CVApre*.mpr")) + list(folder.glob("*_CVpre*.mpr"))
-    cv_files_after = list(folder.glob("*_CVApost*.mpr")) + list(folder.glob("*_CVpost*.mpr"))
-    eis_files = list(folder.glob("*_PEIS_*.mpr"))
+    classified = classify_technique_files(folder, config, warn=True)
+    gcpl_files = classified.get("gcpl", [])
+    gcpl_file = gcpl_files[0] if gcpl_files else None
+    ocv_files = classified.get("ocv", [])
+    cv_files_before = classified.get("cv_pre", [])
+    cv_files_after = classified.get("cv_post", [])
+    eis_by_tag = {
+        tag: classified[f"eis_{tag}"][0] for tag in EIS_TAGS if f"eis_{tag}" in classified
+    }
     mps_files = list(folder.glob("*.mps"))
     battinfo_files = list(folder.glob("*.xlsx"))
     logger.debug("Reading GCPL: %s", ", ".join([f.stem for f in gcpl_files]))
-    logger.debug("Reading LSV: %s", ", ".join([f.stem for f in lsv_files]))
+    logger.debug(
+        "Reading LSV: %s",
+        ", ".join(f.stem for label in ("lsv_pre", "lsv_post") for f in classified.get(label, [])),
+    )
     logger.debug("Reading CV before: %s", ", ".join([f.stem for f in cv_files_before]))
     logger.debug("Reading CV after:  %s", ", ".join([f.stem for f in cv_files_after]))
-    logger.debug("Reading EIS files: %s", ", ".join([f.stem for f in eis_files]))
+    logger.debug("Reading EIS files: %s", ", ".join([f.stem for f in eis_by_tag.values()]))
     logger.debug("Checking BattINFO files: %s", ", ".join([f.stem for f in battinfo_files]))
 
     cycle_df = None
@@ -133,6 +326,7 @@ def analyse_sample(
     logger.info("Battinfo-ifying")
     battinfo_json = None
     battinfo_sample_id = None
+    raw_battinfo_json: dict | None = None
     if not battinfo_files:
         logger.info("- ☹️ No battinfo xlsx found, skipping")
     else:
@@ -145,6 +339,7 @@ def analyse_sample(
             battinfo_xlsx_path = file
             fcid = raw_json["schema:productID"]
             battinfo_sample_id = raw_json["schema:name"]
+            raw_battinfo_json = raw_json
             battinfo_json = battinfo.make_test_object(raw_json)
             if pub_info and pub_info.get("citation_string"):
                 battinfo_json = battinfo.merge_jsonld_on_type(
@@ -173,13 +368,17 @@ def analyse_sample(
         else:
             logger.info("- ☹️ Couldn't convert battinfo xlsx")
 
+    sample_id = get_sampleid_from_folderpath(folder, config, battinfo_sample_id)
+    area_cm2 = get_area_cm2(config, raw_battinfo_json)
+    assembled_resistance_ohm = get_assembled_resistance_ohm(
+        config, raw_battinfo_json, gcpl_files[0].stem if gcpl_files else None
+    )
+
     logger.info("⛓️‍💥 Analysing OCV")
+    av_ocv = (np.nan, np.nan)
     if len(ocv_files) == 0:
         logger.info("- ☹️ No OCV found, skipping")
-        av_ocv = (np.nan, np.nan)
     else:
-        if len(ocv_files) > 1:
-            logger.warning("- More than one OCV file, only reading %s", ocv_files[0].stem)
         try:
             av_ocv = ocv.analyse(ocv_files[0])
             tracked_mpr_inputs["ocv"] = [ocv_files[0]]
@@ -203,26 +402,20 @@ def analyse_sample(
 
     logger.info("↗️ Analysing LSV")
     lsv_res = {"pre": np.nan, "post": np.nan}
-    if len(lsv_files) == 0:
+    lsv_pre_files = classified.get("lsv_pre", [])
+    lsv_post_files = classified.get("lsv_post", [])
+    if not lsv_pre_files and not lsv_post_files:
         logger.info("- ☹️ No LSV files found, skipping")
     else:
-        # Assume that small number is pre and big number is post
-        numbers = [
-            int(m.group(1)) if (m := re.match(r"_([\d]+)_LSV_", f.stem)) else 0 for f in lsv_files
-        ]
-        lsv_files = [f for _, f in sorted(zip(numbers, lsv_files, strict=True))]
-        if len(lsv_files) > 2:
-            logger.warning(
-                "- More than two LSV files, assuming %d is pre and %d is post",
-                numbers[0],
-                numbers[-1],
-            )
-
-        if len(lsv_files) == 1:
-            p = "pre" if numbers[0] < 8 else "post"
-            logger.warning("- Only one LSV file found, assuming it is %s", p)
+        if bool(lsv_pre_files) != bool(lsv_post_files):
+            only = "pre" if lsv_pre_files else "post"
+            logger.warning("- Only one LSV file found, assuming it is %s", only)
+        lsv_rows = []
+        for p, lsv_files_p in [("pre", lsv_pre_files), ("post", lsv_post_files)]:
+            if not lsv_files_p:
+                continue
             try:
-                df, results = lsv.analyse(lsv_files[0])
+                df, results = lsv.analyse(lsv_files_p[0], area_cm2=area_cm2)
                 fig, _ax = lsv.plot(df, results)
                 fig.savefig(results_dir / f"lsv_{p}.png")
                 plt.close(fig)
@@ -233,47 +426,12 @@ def analyse_sample(
                     tracked_outputs[f"lsv_{p}"].append(
                         (results_dir / f"lsv_{p}.x").with_suffix(bdf_suffix)
                     )
-                tracked_mpr_inputs[f"lsv_{p}"] = [lsv_files[0]]
-                results = {"Pre or post cycle": p, **results}
-                lsv_df = pd.DataFrame([results])
+                tracked_mpr_inputs[f"lsv_{p}"] = [lsv_files_p[0]]
+                lsv_rows.append({"Pre or post cycle": p, **results})
             except ValueError:
                 logger.exception("Failed to analyse LSV file")
-        else:
-            try:
-                df, results_pre = lsv.analyse(lsv_files[0])
-                df_save_bdf(df, results_dir / "lsv_pre.x", save_format=save_format)
-                fig, _ax = lsv.plot(df, results_pre)
-                fig.savefig(results_dir / "lsv_pre.png")
-                plt.close(fig)
-                lsv_res["pre"] = float(results_pre["Area specific resistance / Ω cm²"])
-                tracked_outputs["lsv_pre"] = [results_dir / "lsv_pre.png"]
-                if bdf_suffix:
-                    tracked_outputs["lsv_pre"].append(
-                        (results_dir / "lsv_pre.x").with_suffix(bdf_suffix)
-                    )
-                tracked_mpr_inputs["lsv_pre"] = [lsv_files[0]]
-
-                df, results_post = lsv.analyse(lsv_files[-1])
-                df_save_bdf(df, results_dir / "lsv_post.x", save_format=save_format)
-                fig, _ax = lsv.plot(df, results_post)
-                fig.savefig(results_dir / "lsv_post.png")
-                plt.close(fig)
-                lsv_res["post"] = float(results_post["Area specific resistance / Ω cm²"])
-                tracked_outputs["lsv_post"] = [results_dir / "lsv_post.png"]
-                if bdf_suffix:
-                    tracked_outputs["lsv_post"].append(
-                        (results_dir / "lsv_post.x").with_suffix(bdf_suffix)
-                    )
-                tracked_mpr_inputs["lsv_post"] = [lsv_files[-1]]
-
-                lsv_df = pd.DataFrame(
-                    [
-                        {"Pre or post cycle": "pre", **results_pre},
-                        {"Pre or post cycle": "post", **results_post},
-                    ]
-                )
-            except ValueError:
-                logger.exception("Failed to analyse LSV file")
+        if lsv_rows:
+            lsv_df = pd.DataFrame(lsv_rows)
 
     logger.info("🚴 Analysing CV")
     cv_res = {"pre": np.nan, "post": np.nan}
@@ -283,14 +441,20 @@ def analyse_sample(
         for p, cv_files in [("pre", cv_files_before), ("post", cv_files_after)]:
             if not cv_files:
                 continue
-            if len(cv_files) > 1:
-                logger.warning("More than one CV file, only reading %s", cv_files[0].stem)
-            df, cv_df, capacitance_mF = cv.analyse(cv_files[0])
+            df, cv_df, capacitance_mF = cv.analyse(
+                cv_files[0],
+                v_min=config.cv_v_min,
+                v_max=config.cv_v_max,
+                v_med=config.cv_v_med,
+                v_range=config.cv_v_range,
+                min_r2=config.cv_min_r2,
+            )
             df_save_bdf(df, results_dir / f"cv_{p}.x", save_format=save_format)
-            fig, _ax = cv.plot(df, cv_df)
+            fig, _ax = cv.plot(df, cv_df, min_r2=config.cv_min_r2)
             fig.savefig(results_dir / f"cv_{p}.png")
             plt.close(fig)
-            cv_res[p] = capacitance_mF
+            if capacitance_mF:
+                cv_res[p] = capacitance_mF
             tracked_outputs[f"cv_{p}"] = [results_dir / f"cv_{p}.png"]
             if bdf_suffix:
                 tracked_outputs[f"cv_{p}"].append(
@@ -301,11 +465,10 @@ def analyse_sample(
     logger.info("🌈 Analysing PEIS")
     eis_res = {}
     rows = []
-    if len(eis_files) == 0:
+    if not eis_by_tag:
         logger.warning("- ☹️ No EIS files were found, skipping")
     else:
-        tags = ["pre", "pre-50%SOC", "post-50%SOC", "post"]
-        for tag, eis_file in zip(tags, eis_files, strict=False):
+        for tag, eis_file in eis_by_tag.items():
             f = Path(eis_file)
             try:
                 df = read_to_bdf(f)
@@ -359,7 +522,7 @@ def analyse_sample(
         "1st VE / %",
     ]
     # n cycles to include in the summary file
-    n_cycles = [10, 20, 30, 40, 50]
+    n_cycles = config.summary_n_cycles
     for n in n_cycles:
         cols.extend(
             [
@@ -383,7 +546,7 @@ def analyse_sample(
     summary["∆F / mF"]["Value"] = (
         cv_res["post"] - cv_res["pre"] if (cv_res["post"] and cv_res["pre"]) else None
     )
-    summary["Assembled resistance / Ω"]["Value"] = get_res_from_filename(gcpl_files[0].stem)
+    summary["Assembled resistance / Ω"]["Value"] = assembled_resistance_ohm
     summary["EIS R pre / Ω"]["Value"] = eis_res.get("pre", {}).get("R0", {}).get("value")
     summary["EIS R pre / Ω"]["Error"] = eis_res.get("pre", {}).get("R0", {}).get("err")
     summary["EIS R pre-50%SOC / Ω"]["Value"] = (
@@ -484,8 +647,10 @@ def analyse_sample(
         zenodo_url = pub_info.get("zenodo_doi_url") if pub_info else None
         for label, paths in tracked_mpr_inputs.items():
             for path in paths:
-                snippet = battinfo.add_input_data(
-                    path.relative_to(folder).as_posix(), zenodo_url, MPR_DESCRIPTIONS.get(label)
+                snippet = battinfo.add_data(
+                    path.relative_to(folder).as_posix(),
+                    zenodo_url,
+                    extras={"rdfs:comment": MPR_DESCRIPTIONS.get(label)},
                 )
                 battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
         for path in mps_files:
@@ -508,30 +673,36 @@ def analyse_sample(
                 with contextlib.suppress(ValueError):
                     snippet = battinfo.add_data(rel, zenodo_url)
                     battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
-        metadata_path = folder / f"metadata.{battinfo_sample_id}.json"
+        metadata_path = folder / f"metadata.{sample_id}.json"
         with metadata_path.open("w") as mf:
             json.dump(battinfo_json, mf, indent=4)
         tracked_outputs["metadata"] = [metadata_path]
 
-    return tracked_outputs, tracked_extra_inputs, fcid
+    return tracked_outputs, tracked_extra_inputs, fcid, sample_id
 
 
-def is_sample_folder(folderpath: str | Path) -> bool:
-    """Determine whether a folder is a sample folder. A sample folder contains at least 1 mpr file."""
+def is_sample_folder(folderpath: str | Path, config: PyFlowBattConfig | None = None) -> bool:
+    """Determine whether a folder is a sample folder.
+
+    A sample folder contains at least one file matching any configured technique pattern.
+    """
     folderpath = Path(folderpath)
     if not folderpath.is_dir():
         return False
-    return bool(list(folderpath.glob("*.mpr")))
+    config = config or PyFlowBattConfig.load(folderpath)
+    return any(any(folderpath.glob(p)) for p in config.all_patterns())
 
 
 def find_all_sample_folders(
     folder: str | Path,
     max_search_depth: int = DEFAULT_DEPTH,
     max_folder_searches: int = DEFAULT_SEARCH,
+    config: PyFlowBattConfig | None = None,
 ) -> list[Path]:
     """Find all sample folders in a folder."""
     folder = Path(folder)
-    if is_sample_folder(folder):
+    config = config or PyFlowBattConfig.load(folder)
+    if is_sample_folder(folder, config):
         return [folder]
     sample_folders = []
     depth_exceeded_count = 0
@@ -546,7 +717,7 @@ def find_all_sample_folders(
         if depth > max_search_depth:
             depth_exceeded_count += 1
             return
-        if is_sample_folder(folder):
+        if is_sample_folder(folder, config):
             sample_folders.append(folder)
             return
         for subfolder in folder.iterdir():
@@ -577,10 +748,11 @@ def find_all_sample_summaries(
     folder: str | Path,
     max_search_depth: int = DEFAULT_DEPTH,
     max_folder_searches: int = DEFAULT_SEARCH,
+    config: PyFlowBattConfig | None = None,
 ) -> list[Path]:
     """Collect all summary excels from all subfolders."""
     folder = Path(folder)
-    sample_folders = find_all_sample_folders(folder, max_search_depth, max_folder_searches)
+    sample_folders = find_all_sample_folders(folder, max_search_depth, max_folder_searches, config)
     return [
         f / "results" / "summary.xlsx"
         for f in sample_folders
@@ -588,10 +760,17 @@ def find_all_sample_summaries(
     ]
 
 
-def merge_summaries(summary_xlsxs: list[str | Path]) -> pd.DataFrame:
+def merge_summaries(
+    summary_xlsxs: list[str | Path],
+    sample_ids_by_sample_folder: dict[Path, str] | None = None,
+) -> pd.DataFrame:
     """Merge all summary sheets into one mega summary."""
     summary_xlsxs_paths = [Path(s).resolve() for s in summary_xlsxs]
-    names = [get_sampleid_from_folderpath(s.parent.parent) for s in summary_xlsxs_paths]
+    names = [
+        (sample_ids_by_sample_folder or {}).get(s.parent.parent)
+        or get_sampleid_from_folderpath(s.parent.parent)
+        for s in summary_xlsxs_paths
+    ]
     # append a number to duplicate names
     for i, name in enumerate(names):
         if names.count(name) > 1:
@@ -625,28 +804,40 @@ def analyse_all_samples(
     """Take a folder and run all analysis."""
     folder = Path(folder).resolve()
     pub_info = pub_info_from_root(folder)
-    samples = find_all_sample_folders(folder, max_search_depth, max_folder_searches)
-    if len(samples) == 0:
+    search_config = PyFlowBattConfig.load(folder)
+    sample_folders = find_all_sample_folders(
+        folder, max_search_depth, max_folder_searches, search_config
+    )
+    if len(sample_folders) == 0:
         logger.error("No sample folders found in %s", folder)
         return
-    tracked_by_sample: dict[Path, dict[str, list[Path]]] = {}
-    tracked_extras_by_sample: dict[Path, dict[str, list[Path]]] = {}
-    fcids_by_sample: dict[Path, str | None] = {}
-    if len(samples) == 1:
+    configs_by_sample_folder: dict[Path, PyFlowBattConfig] = {
+        sample_folder: PyFlowBattConfig.load(sample_folder) for sample_folder in sample_folders
+    }
+    tracked_by_sample_folder: dict[Path, dict[str, list[Path]]] = {}
+    tracked_extras_by_sample_folder: dict[Path, dict[str, list[Path]]] = {}
+    fcids_by_sample_folder: dict[Path, str | None] = {}
+    sample_ids_by_sample_folder: dict[Path, str] = {}
+    if len(sample_folders) > 1:
+        logger.info("Found %d sample folders:", len(sample_folders))
+    for sample_folder in sample_folders:
         (
-            tracked_by_sample[samples[0]],
-            tracked_extras_by_sample[samples[0]],
-            fcids_by_sample[samples[0]],
-        ) = analyse_sample(samples[0], save_format=save_format, pub_info=pub_info)
-    else:
-        logger.info("Found %d sample folders:", len(samples))
-        for s in samples:
-            tracked_by_sample[s], tracked_extras_by_sample[s], fcids_by_sample[s] = analyse_sample(
-                s, save_format=save_format, pub_info=pub_info
-            )
+            tracked_by_sample_folder[sample_folder],
+            tracked_extras_by_sample_folder[sample_folder],
+            fcids_by_sample_folder[sample_folder],
+            sample_ids_by_sample_folder[sample_folder],
+        ) = analyse_sample(
+            sample_folder,
+            save_format=save_format,
+            pub_info=pub_info,
+            config=configs_by_sample_folder[sample_folder],
+        )
 
-        summaries = find_all_sample_summaries(folder, max_search_depth, max_folder_searches)
-        df = merge_summaries(summaries)
+    if len(sample_folders) > 1:
+        summaries = find_all_sample_summaries(
+            folder, max_search_depth, max_folder_searches, search_config
+        )
+        df = merge_summaries(summaries, sample_ids_by_sample_folder)
         writer = pd.ExcelWriter(folder / "combined_summary.xlsx", engine="xlsxwriter")
         df.to_excel(writer, index=False, sheet_name="Summary")
         workbook = writer.book
@@ -657,7 +848,15 @@ def analyse_all_samples(
 
     from PyFlowBatt.rocrate_output import write_rocrate  # noqa: PLC0415
 
-    write_rocrate(folder, samples, tracked_by_sample, tracked_extras_by_sample, fcids_by_sample)
+    write_rocrate(
+        folder,
+        sample_folders,
+        tracked_by_sample_folder,
+        tracked_extras_by_sample_folder,
+        fcids_by_sample_folder,
+        configs_by_sample_folder,
+        sample_ids_by_sample_folder,
+    )
     logger.info("📦 Written RO-Crate metadata to %s", folder / "ro-crate-metadata.json")
 
 
@@ -669,18 +868,19 @@ def dry_analyse_all_samples(
     """Take a folder and tell the user what PyFlowBatt would do."""
     logger.info("Beginning dry-run search.")
     folder = Path(folder).resolve()
-    samples = find_all_sample_folders(folder, max_search_depth, max_folder_searches)
-    if len(samples) == 0:
+    config = PyFlowBattConfig.load(folder)
+    sample_folders = find_all_sample_folders(folder, max_search_depth, max_folder_searches, config)
+    if len(sample_folders) == 0:
         logger.error("No sample folders found in %s", folder)
         return
-    if len(samples) == 1:
+    if len(sample_folders) == 1:
         logger.info("Found 1 sample inside")
     else:
-        logger.info("Found %d samples inside.", len(samples))
+        logger.info("Found %d samples inside.", len(sample_folders))
     logger.info("I would analyse the following samples and make a 'results' subfolder inside:")
-    for s in samples:
-        logger.info("  - %s", s)
-    if len(samples) > 1:
+    for sample_folder in sample_folders:
+        logger.info("  - %s", sample_folder)
+    if len(sample_folders) > 1:
         logger.info(
             "Then I would combine all the summaries into one 'combined_results' subfolder inside %s.",
             folder,

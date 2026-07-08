@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 from rocrate.rocrate import ROCrate
 
 from PyFlowBatt.analysis import get_sampleid_from_folderpath
+from PyFlowBatt.config import PyFlowBattConfig, classify_technique_files
 
 MEASUREMENT_LABELS: dict[str, str] = {
     "gcpl": "Galvanostatic Cycling with Potential Limitation",
@@ -30,8 +30,6 @@ ENCODING_FORMATS: dict[str, str] = {
     ".mpr": "application/octet-stream",
 }
 
-EIS_TAGS = ["eis_pre", "eis_pre-50%SOC", "eis_post-50%SOC", "eis_post"]
-
 OUTPUT_DESCRIPTIONS: dict[str, str] = {
     "gcpl": "Galvanostatic cycling analysis",
     "lsv_pre": "Pre-cycling linear sweep voltammetry analysis",
@@ -52,45 +50,18 @@ EXTRA_INPUT_DESCRIPTIONS: dict[str, str] = {
 }
 
 
-def _classify_inputs(sample_folder: Path) -> dict[str, list[Path]]:
-    """Map measurement labels to their input MPR files for one sample folder."""
-    inputs: dict[str, list[Path]] = {}
+def _classify_inputs(
+    sample_folder: Path, config: PyFlowBattConfig | None = None
+) -> dict[str, list[Path]]:
+    """Map measurement labels to their input files for one sample folder.
 
-    gcpl_files = list(sample_folder.glob("*_GCPL_*.mpr"))
-    if gcpl_files:
-        gcpl_file = max(gcpl_files, key=lambda x: x.stat().st_size)
-        inputs["gcpl"] = [gcpl_file]
-
-    ocv_files = list(sample_folder.glob("*_OCV_*.mpr"))
-    if ocv_files:
-        inputs["ocv"] = [ocv_files[0]]
-
-    lsv_files = list(sample_folder.glob("*_LSV_*.mpr"))
-    if lsv_files:
-        numbers = [
-            int(m.group(1)) if (m := re.match(r"_([\d]+)_LSV_", f.stem)) else 0 for f in lsv_files
-        ]
-        lsv_files = [f for _, f in sorted(zip(numbers, lsv_files, strict=True))]
-        if len(lsv_files) == 1:
-            p = "pre" if numbers[0] < 8 else "post"  # noqa: PLR2004
-            inputs[f"lsv_{p}"] = [lsv_files[0]]
-        else:
-            inputs["lsv_pre"] = [lsv_files[0]]
-            inputs["lsv_post"] = [lsv_files[-1]]
-
-    cv_pre = list(sample_folder.glob("*_CVApre*.mpr")) + list(sample_folder.glob("*_CVpre*.mpr"))
-    if cv_pre:
-        inputs["cv_pre"] = [cv_pre[0]]
-
-    cv_post = list(sample_folder.glob("*_CVApost*.mpr")) + list(sample_folder.glob("*_CVpost*.mpr"))
-    if cv_post:
-        inputs["cv_post"] = [cv_post[0]]
-
-    eis_files = list(sample_folder.glob("*_PEIS_*.mpr"))
-    for tag, eis_file in zip(EIS_TAGS, eis_files, strict=False):
-        inputs[tag] = [eis_file]
-
-    return inputs
+    Delegates to the same classifier `analyse_sample` uses, so RO-Crate output
+    honors the same `pyflowbatt.toml` configuration. warn=False (default) avoids
+    re-logging the ambiguity warnings `analyse_sample` already emitted earlier
+    in the same run.
+    """
+    config = config or PyFlowBattConfig.load(sample_folder)
+    return classify_technique_files(sample_folder, config)
 
 
 def _rel(path: Path, root: Path) -> str:
@@ -101,9 +72,11 @@ def _rel(path: Path, root: Path) -> str:
 def write_rocrate(
     root_folder: Path,
     sample_folders: list[Path],
-    tracked_by_sample: dict[Path, dict[str, list[Path]]],
-    tracked_extras_by_sample: dict[Path, dict[str, list[Path]]] | None = None,
-    fcids_by_sample: dict[Path, str | None] | None = None,
+    tracked_by_sample_folder: dict[Path, dict[str, list[Path]]],
+    tracked_extras_by_sample_folder: dict[Path, dict[str, list[Path]]] | None = None,
+    fcids_by_sample_folder: dict[Path, str | None] | None = None,
+    configs_by_sample_folder: dict[Path, PyFlowBattConfig] | None = None,
+    sample_ids_by_sample_folder: dict[Path, str] | None = None,
 ) -> None:
     """Write ro-crate-metadata.json at root_folder describing all inputs and outputs."""
     crate = ROCrate()
@@ -116,10 +89,13 @@ def write_rocrate(
     all_sample_datasets = []
 
     for sample_folder in sample_folders:
-        sample_id = get_sampleid_from_folderpath(sample_folder)
+        config = (configs_by_sample_folder or {}).get(sample_folder)
+        sample_id = (sample_ids_by_sample_folder or {}).get(
+            sample_folder
+        ) or get_sampleid_from_folderpath(sample_folder, config)
         rel_sample = _rel(sample_folder, root_folder)
 
-        fcid = fcids_by_sample.get(sample_folder) if fcids_by_sample else None
+        fcid = fcids_by_sample_folder.get(sample_folder) if fcids_by_sample_folder else None
         sample_props: dict = {
             "name": sample_id,
             "description": f"Electrochemical cell measurements: {sample_folder.name}",
@@ -130,7 +106,7 @@ def write_rocrate(
         all_sample_datasets.append(sample_dataset)
         sample_file_entities = []
 
-        inputs = _classify_inputs(sample_folder)
+        inputs = _classify_inputs(sample_folder, config)
         input_entities: dict[str, list] = {}
         for label, mpr_paths in inputs.items():
             label_entities = []
@@ -153,7 +129,11 @@ def write_rocrate(
 
         all_input_entities = [e for ents in input_entities.values() for e in ents]
 
-        extras = tracked_extras_by_sample.get(sample_folder, {}) if tracked_extras_by_sample else {}
+        extras = (
+            tracked_extras_by_sample_folder.get(sample_folder, {})
+            if tracked_extras_by_sample_folder
+            else {}
+        )
         extra_entities: dict[str, list] = {}
         for label, paths in extras.items():
             desc = EXTRA_INPUT_DESCRIPTIONS.get(label, label)
@@ -177,7 +157,7 @@ def write_rocrate(
             if label_extra_ents:
                 extra_entities[label] = label_extra_ents
 
-        for label, paths in tracked_by_sample.get(sample_folder, {}).items():
+        for label, paths in tracked_by_sample_folder.get(sample_folder, {}).items():
             if label == "metadata":
                 derived_from = extra_entities.get("battinfo_xlsx") or None
             else:
