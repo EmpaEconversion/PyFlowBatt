@@ -18,15 +18,44 @@ from PyFlowBatt.read import read_to_bdf
 logger = logging.getLogger(__name__)
 
 
-def plot(df: pd.DataFrame) -> tuple[Figure, Axes]:
+def plot(df: pd.DataFrame, cycle_df: pd.DataFrame) -> tuple[Figure, list[Axes]]:
     """Plot time series data."""
-    fig, ax = plt.subplots()
+    fig, axs = plt.subplots(nrows=5, figsize=(8, 10))
     df = df.reset_index()
-    ax.plot((df["Unix Time / s"] - df["Unix Time / s"].iloc[0]) / 3600, df["Voltage / V"])
-    ax.set_xlabel("Time / h")
-    ax.set_ylabel("Voltage / V")
+
+    kw_chg = {"color": "C1", "marker": "o", "label": "Charging"}
+    kw_dchg = {"color": "C1", "marker": "o", "label": "Discharging", "markerfacecolor": "w"}
+    kw_echg = {"color": "C2", "marker": "s", "label": "Charging"}
+    kw_edchg = {"color": "C2", "marker": "s", "label": "Discharging", "markerfacecolor": "w"}
+    kw_ce = {"color": "C3", "marker": "D", "label": "Coulombic"}
+    kw_ve = {"color": "C4", "marker": "v", "label": "Voltage"}
+
+    axs[0].plot((df["Unix Time / s"] - df["Unix Time / s"].iloc[0]) / 3600, df["Voltage / V"])
+    axs[0].set_xlabel("Time / h")
+    axs[0].set_ylabel("Voltage / V")
+
+    axs[1].plot(cycle_df["Cycle Count / 1"], cycle_df["Charge Capacity / mAh"], **kw_chg)
+    axs[1].plot(cycle_df["Cycle Count / 1"], cycle_df["Discharge Capacity / mAh"], **kw_dchg)
+    axs[1].set_xlabel("Cycle Count / 1")
+    axs[1].set_ylabel("Capacity / mAh")
+    axs[1].legend()
+
+    axs[2].plot(cycle_df["Cycle Count / 1"], cycle_df["Charge Energy / mWh"], **kw_echg)
+    axs[2].plot(cycle_df["Cycle Count / 1"], cycle_df["Discharge Energy / mWh"], **kw_edchg)
+    axs[2].set_xlabel("Cycle Count / 1")
+    axs[2].set_ylabel("Energy / mWh")
+    axs[2].legend()
+
+    axs[3].plot(cycle_df["Cycle Count / 1"], cycle_df["Coulombic Efficiency / %"], **kw_ce)
+    axs[3].set_xlabel("Cycle Count / 1")
+    axs[3].set_ylabel("Coulombic\nEfficiency / %")
+
+    axs[4].plot(cycle_df["Cycle Count / 1"], cycle_df["Voltage Efficiency / %"], **kw_ve)
+    axs[4].set_xlabel("Cycle Count / 1")
+    axs[4].set_ylabel("Voltage\nEfficiency / %")
+
     fig.tight_layout()
-    return fig, ax
+    return fig, axs
 
 
 def analyse(filepaths: str | Path | list[str | Path]) -> tuple[pd.DataFrame, pd.DataFrame]:

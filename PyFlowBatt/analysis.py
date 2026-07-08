@@ -393,7 +393,7 @@ def analyse_sample(
         logger.warning("- ☹️ No GCPL files found, skipping")
     else:
         df, cycle_df = gcpl.analyse([gcpl_file])
-        fig, _ax = gcpl.plot(df)
+        fig, _ax = gcpl.plot(df, cycle_df)
         fig.savefig(results_dir / "gcpl.png")
         plt.close(fig)
         ratetest_df = gcpl.cycles_to_ratetest(cycle_df)
