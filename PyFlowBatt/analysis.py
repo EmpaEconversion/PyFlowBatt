@@ -341,6 +341,9 @@ def analyse_sample(
             battinfo_sample_id = raw_json["schema:name"]
             raw_battinfo_json = raw_json
             battinfo_json = battinfo.make_test_object(raw_json)
+            battinfo_json = battinfo.merge_jsonld_on_type(
+                [battinfo_json, battinfo.add_input_and_output()],
+            )
             if pub_info and pub_info.get("citation_string"):
                 battinfo_json = battinfo.merge_jsonld_on_type(
                     [battinfo_json, battinfo.add_citation(pub_info["citation_string"])]
@@ -673,7 +676,7 @@ def analyse_sample(
                 with contextlib.suppress(ValueError):
                     snippet = battinfo.add_data(rel, zenodo_url)
                     battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
-        metadata_path = folder / f"metadata.{sample_id}.json"
+        metadata_path = folder / f"metadata.{fcid or sample_id}.json"
         with metadata_path.open("w") as mf:
             json.dump(battinfo_json, mf, indent=4)
         tracked_outputs["metadata"] = [metadata_path]

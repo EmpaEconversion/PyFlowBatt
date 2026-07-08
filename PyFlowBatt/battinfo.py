@@ -362,6 +362,25 @@ def make_test_object(battinfo_jsonld: dict) -> dict:
     raise ValueError(msg)
 
 
+def add_input_and_output() -> dict:
+    """Create output and input datasets with CC by 4.0 licences."""
+    return {
+        "@type": "BatteryTest",
+        "hasOutput": {
+            "@type": ["BatteryTestResult", "dcat:Dataset"],
+            "dcterms:license": {"@id": "https://creativecommons.org/licenses/by/4.0/"},
+            "dcterms:issued": datetime.now().date().isoformat(),  # noqa: DTZ005
+            "schema:datePublished": datetime.now().date().isoformat(),  # noqa: DTZ005
+        },
+        "hasInput": {
+            "@type": "dcat:Dataset",
+            "dcterms:license": {"@id": "https://creativecommons.org/licenses/by/4.0/"},
+            "dcterms:issued": datetime.now().date().isoformat(),  # noqa: DTZ005
+            "schema:datePublished": datetime.now().date().isoformat(),  # noqa: DTZ005
+        },
+    }
+
+
 def merge_jsonld(json1: dict, json2: dict) -> dict:
     """Merge two JSON-LD structures assuming they reference the SAME NODE."""
     if not isinstance(json1, dict) or not isinstance(json2, dict):
@@ -458,8 +477,8 @@ def add_ccid_output(
     return {
         "@type": "BatteryTest",
         "hasOutput": {
-            "dc:title": f"Cycling data coin cell {ccid}",
-            "dc:description": f"Cycling data coin cell {ccid}",
+            "dcterms:title": f"Cycling data coin cell {ccid}",
+            "dcterms:description": f"Cycling data coin cell {ccid}",
         },
     }
 
@@ -552,7 +571,8 @@ def add_data(
         }
     elif rel_file_path.endswith(".mpr"):
         additions = {
-            "rdfs:comment": "Raw electrochemical data in proprietary Biologic .mpr binary format"
+            "@type": ["dcat:Distribution", "RawData"],
+            "rdfs:comment": "Raw electrochemical data in proprietary Biologic .mpr binary format",
         }
     elif rel_file_path.endswith(".mps"):
         additions = {"rdfs:comment": "Cycling protocol in text-based Biologic .mps format"}
@@ -620,9 +640,6 @@ def add_citation(
         "@type": "BatteryTest",
         "hasOutput": {
             "schema:citation": citation_string,
-            "dc:license": "https://creativecommons.org/licenses/by/4.0/",
-            "dc:issued": datetime.now().date().isoformat(),  # noqa: DTZ005
-            "schema:datePublished": datetime.now().date().isoformat(),  # noqa: DTZ005
         },
     }
 
@@ -678,7 +695,7 @@ def add_authors(
     return {
         "@type": "BatteryTest",
         "hasOutput": {
-            "dc:creator": authors_jsonld[0] if len(authors_jsonld) == 1 else authors_jsonld,
+            "dcterms:creator": authors_jsonld[0] if len(authors_jsonld) == 1 else authors_jsonld,
         },
     }
 
