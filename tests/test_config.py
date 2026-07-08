@@ -160,7 +160,7 @@ def test_sample_id_toml_battinfo_conflict_raises(tmp_path: Path) -> None:
         get_sampleid_from_folderpath(sample_dir, config, battinfo_name="different-battinfo-name")
 
 
-def test_analyse_sample_uses_battinfo_name_when_no_toml_override(
+def test_analyse_sample_uses_battinfo_fcid_without_toml(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """analyse_sample resolves sample_name from BattINFO when pyflowbatt.toml doesn't set one."""
@@ -175,7 +175,7 @@ def test_analyse_sample_uses_battinfo_name_when_no_toml_override(
         return {
             "@context": {},
             "@type": "RedoxFlowBattery",
-            "schema:productID": "FCID1",
+            "schema:productID": "empa__fcid123456",
             "schema:name": "battinfo-derived-name",
         }
 
@@ -186,7 +186,37 @@ def test_analyse_sample_uses_battinfo_name_when_no_toml_override(
         sample, save_format=None, config=config
     )
     assert sample_id == "battinfo-derived-name"
-    assert fcid == "FCID1"
+    assert fcid == "empa__fcid123456"
+    assert (sample / "metadata.empa__fcid123456.json").exists()
+
+
+def test_analyse_sample_uses_battinfo_name_without_toml_fcid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """analyse_sample resolves sample_name from BattINFO when pyflowbatt.toml doesn't set one."""
+    from PyFlowBatt import analysis as analysis_module
+
+    # A folder name that would NOT match the default sample-ID regex.
+    sample = tmp_path / "not-a-normal-sample-name"
+    sample.mkdir()
+    (sample / "metadata.xlsx").write_text("x")  # content is irrelevant; conversion is stubbed
+
+    def fake_convert(_file: Path) -> dict:
+        return {
+            "@context": {},
+            "@type": "RedoxFlowBattery",
+            "schema:productID": None,
+            "schema:name": "battinfo-derived-name",
+        }
+
+    monkeypatch.setattr(analysis_module, "convert_excel_to_jsonld", fake_convert)
+
+    config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
+    _tracked_outputs, _tracked_extra_inputs, fcid, sample_id = analysis_module.analyse_sample(
+        sample, save_format=None, config=config
+    )
+    assert sample_id == "battinfo-derived-name"
+    assert fcid is None
     assert (sample / "metadata.battinfo-derived-name.json").exists()
 
 
