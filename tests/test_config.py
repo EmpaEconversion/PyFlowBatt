@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from PyFlowBatt.config import PyFlowBattConfig, classify_technique_files
-from PyFlowBatt.rocrate_output import _classify_inputs
+from pyflowbatt.config import PyFlowBattConfig, classify_technique_files
+from pyflowbatt.rocrate_output import _classify_inputs
 
 # Synthetic filename scheme mirroring real EC-Lab exports: <prefix>_<num>_<TECHNIQUE>_<tail>.<ext>
 # Sizes are included as the largest GCPL is used as cycling.
@@ -106,7 +106,7 @@ def test_shared_classifier_used_by_rocrate(tmp_path: Path) -> None:
 
 def test_sample_id_explicit_override(tmp_path: Path) -> None:
     """sample_name in pyflowbatt.toml overrides detection, regardless of folder name."""
-    from PyFlowBatt.analysis import get_sampleid_from_folderpath
+    from pyflowbatt.analysis import get_sampleid_from_folderpath
 
     # A folder name that would NOT match the default sample-ID regex.
     sample_dir = tmp_path / "not-a-normal-sample-name"
@@ -119,7 +119,7 @@ def test_sample_id_explicit_override(tmp_path: Path) -> None:
 
 def test_sample_id_battinfo_name_used_when_no_toml_override(tmp_path: Path) -> None:
     """With no pyflowbatt.toml sample_name set, a BattINFO name wins over the folder name."""
-    from PyFlowBatt.analysis import get_sampleid_from_folderpath
+    from pyflowbatt.analysis import get_sampleid_from_folderpath
 
     # A folder name that would NOT match the default sample-ID regex.
     sample_dir = tmp_path / "not-a-normal-sample-name"
@@ -134,7 +134,7 @@ def test_sample_id_battinfo_name_used_when_no_toml_override(tmp_path: Path) -> N
 
 def test_sample_id_toml_wins_over_battinfo_when_they_agree(tmp_path: Path) -> None:
     """A pyflowbatt.toml sample_name matching the BattINFO name is accepted, no error."""
-    from PyFlowBatt.analysis import get_sampleid_from_folderpath
+    from pyflowbatt.analysis import get_sampleid_from_folderpath
 
     sample_dir = tmp_path / "sample"
     sample_dir.mkdir()
@@ -149,7 +149,7 @@ def test_sample_id_toml_wins_over_battinfo_when_they_agree(tmp_path: Path) -> No
 
 def test_sample_id_toml_battinfo_conflict_raises(tmp_path: Path) -> None:
     """A pyflowbatt.toml sample_name that disagrees with the BattINFO name is an error."""
-    from PyFlowBatt.analysis import get_sampleid_from_folderpath
+    from pyflowbatt.analysis import get_sampleid_from_folderpath
 
     sample_dir = tmp_path / "sample"
     sample_dir.mkdir()
@@ -164,7 +164,7 @@ def test_analyse_sample_uses_battinfo_fcid_without_toml(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """analyse_sample resolves sample_name from BattINFO when pyflowbatt.toml doesn't set one."""
-    from PyFlowBatt import analysis as analysis_module
+    from pyflowbatt import analysis as analysis_module
 
     # A folder name that would NOT match the default sample-ID regex.
     sample = tmp_path / "not-a-normal-sample-name"
@@ -194,7 +194,7 @@ def test_analyse_sample_uses_battinfo_name_without_toml_fcid(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """analyse_sample resolves sample_name from BattINFO when pyflowbatt.toml doesn't set one."""
-    from PyFlowBatt import analysis as analysis_module
+    from pyflowbatt import analysis as analysis_module
 
     # A folder name that would NOT match the default sample-ID regex.
     sample = tmp_path / "not-a-normal-sample-name"
@@ -224,7 +224,7 @@ def test_analyse_sample_raises_on_toml_battinfo_conflict(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """analyse_sample raises when pyflowbatt.toml sample_name disagrees with BattINFO's name."""
-    from PyFlowBatt import analysis as analysis_module
+    from pyflowbatt import analysis as analysis_module
 
     sample = tmp_path / "sample"
     sample.mkdir()
@@ -248,7 +248,7 @@ def test_analyse_sample_raises_on_toml_battinfo_conflict(
 
 def test_sample_id_custom_pattern(tmp_path: Path) -> None:
     """sample_name_pattern in pyflowbatt.toml replaces the default sample-ID regex."""
-    from PyFlowBatt.analysis import get_sampleid_from_folderpath
+    from pyflowbatt.analysis import get_sampleid_from_folderpath
 
     sample_dir = tmp_path / "ABC-123"
     sample_dir.mkdir()
@@ -328,15 +328,15 @@ def _make_raw_battinfo_json(
 
 def test_get_area_cm2_default_no_toml_no_battinfo() -> None:
     """With neither pyflowbatt.toml nor BattINFO, area_cm2 falls back to DEFAULT_AREA_CM2."""
-    from PyFlowBatt.analysis import get_area_cm2
-    from PyFlowBatt.config import DEFAULT_AREA_CM2
+    from pyflowbatt.analysis import get_area_cm2
+    from pyflowbatt.config import DEFAULT_AREA_CM2
 
     assert get_area_cm2(PyFlowBattConfig()) == DEFAULT_AREA_CM2
 
 
 def test_get_area_cm2_from_battinfo_when_electrodes_agree() -> None:
     """When positive and negative electrode areas agree, that value is used."""
-    from PyFlowBatt.analysis import get_area_cm2
+    from pyflowbatt.analysis import get_area_cm2
 
     raw_json = _make_raw_battinfo_json(pos_area=5.0, neg_area=5.0)
     assert get_area_cm2(PyFlowBattConfig(), raw_json) == 5.0
@@ -344,7 +344,7 @@ def test_get_area_cm2_from_battinfo_when_electrodes_agree() -> None:
 
 def test_get_area_cm2_from_battinfo_picks_smaller_when_electrodes_disagree() -> None:
     """When positive and negative electrode areas disagree, the smaller one is used."""
-    from PyFlowBatt.analysis import get_area_cm2
+    from pyflowbatt.analysis import get_area_cm2
 
     raw_json = _make_raw_battinfo_json(pos_area=5.0, neg_area=4.0)
     assert get_area_cm2(PyFlowBattConfig(), raw_json) == 4.0
@@ -352,8 +352,8 @@ def test_get_area_cm2_from_battinfo_picks_smaller_when_electrodes_disagree() -> 
 
 def test_get_area_cm2_ignores_wrong_unit() -> None:
     """A BattINFO Area entry in a unit other than CentiM2 is ignored."""
-    from PyFlowBatt.analysis import get_area_cm2
-    from PyFlowBatt.config import DEFAULT_AREA_CM2
+    from pyflowbatt.analysis import get_area_cm2
+    from pyflowbatt.config import DEFAULT_AREA_CM2
 
     raw_json = _make_raw_battinfo_json(pos_area=5.0, neg_area=5.0, unit="unit:MicroM2")
     assert get_area_cm2(PyFlowBattConfig(), raw_json) == DEFAULT_AREA_CM2
@@ -361,7 +361,7 @@ def test_get_area_cm2_ignores_wrong_unit() -> None:
 
 def test_get_area_cm2_toml_wins_when_battinfo_agrees() -> None:
     """An explicit pyflowbatt.toml area_cm2 that agrees with BattINFO is accepted."""
-    from PyFlowBatt.analysis import get_area_cm2
+    from pyflowbatt.analysis import get_area_cm2
 
     raw_json = _make_raw_battinfo_json(pos_area=3.14, neg_area=3.14)
     config = PyFlowBattConfig(area_cm2=3.14)
@@ -370,7 +370,7 @@ def test_get_area_cm2_toml_wins_when_battinfo_agrees() -> None:
 
 def test_get_area_cm2_toml_battinfo_conflict_raises() -> None:
     """An explicit pyflowbatt.toml area_cm2 that disagrees with BattINFO is an error."""
-    from PyFlowBatt.analysis import get_area_cm2
+    from pyflowbatt.analysis import get_area_cm2
 
     raw_json = _make_raw_battinfo_json(pos_area=5.0, neg_area=5.0)
     config = PyFlowBattConfig(area_cm2=3.14)
@@ -384,7 +384,7 @@ def test_analyse_sample_uses_battinfo_area_for_lsv(
     """analyse_sample resolves area_cm2 from BattINFO electrodes when no toml override exists."""
     import pandas as pd
 
-    from PyFlowBatt import analysis as analysis_module
+    from pyflowbatt import analysis as analysis_module
 
     sample = tmp_path / "sample"
     sample.mkdir()
@@ -429,7 +429,7 @@ def test_analyse_sample_raises_on_toml_battinfo_area_conflict(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """analyse_sample raises when pyflowbatt.toml area_cm2 disagrees with BattINFO electrodes."""
-    from PyFlowBatt import analysis as analysis_module
+    from pyflowbatt import analysis as analysis_module
 
     sample = tmp_path / "sample"
     sample.mkdir()
@@ -448,14 +448,14 @@ def test_get_assembled_resistance_ohm_default_no_toml_no_battinfo_no_filename() 
     """With no toml, no BattINFO, and no fallback filename, the result is NaN."""
     import math
 
-    from PyFlowBatt.analysis import get_assembled_resistance_ohm
+    from pyflowbatt.analysis import get_assembled_resistance_ohm
 
     assert math.isnan(get_assembled_resistance_ohm(PyFlowBattConfig()))
 
 
 def test_get_assembled_resistance_ohm_from_filename_fallback() -> None:
     """With no toml or BattINFO, the value is parsed out of the fallback filename."""
-    from PyFlowBatt.analysis import get_assembled_resistance_ohm
+    from pyflowbatt.analysis import get_assembled_resistance_ohm
 
     value = get_assembled_resistance_ohm(
         PyFlowBattConfig(), fallback_filename="sample_25kOhm_04_GCPL_CE4"
@@ -478,7 +478,7 @@ def test_get_assembled_resistance_ohm_from_battinfo_unit_variants(
     unit: str, expected: float
 ) -> None:
     """All six unit spellings/prefixes convert to ohms correctly."""
-    from PyFlowBatt.analysis import get_assembled_resistance_ohm
+    from pyflowbatt.analysis import get_assembled_resistance_ohm
 
     raw_json = _make_raw_battinfo_json(resistance_value="25000", resistance_unit=unit)
     assert get_assembled_resistance_ohm(PyFlowBattConfig(), raw_json) == expected
@@ -486,7 +486,7 @@ def test_get_assembled_resistance_ohm_from_battinfo_unit_variants(
 
 def test_get_assembled_resistance_ohm_ignores_unrecognized_unit() -> None:
     """A BattINFO ElectricResistance with an unrecognized unit falls through to the filename."""
-    from PyFlowBatt.analysis import get_assembled_resistance_ohm
+    from pyflowbatt.analysis import get_assembled_resistance_ohm
 
     raw_json = _make_raw_battinfo_json(resistance_value="25000", resistance_unit="unit:VOLT")
     value = get_assembled_resistance_ohm(
@@ -497,7 +497,7 @@ def test_get_assembled_resistance_ohm_ignores_unrecognized_unit() -> None:
 
 def test_get_assembled_resistance_ohm_toml_wins_when_battinfo_agrees() -> None:
     """An explicit pyflowbatt.toml assembled_resistance_ohm that agrees with BattINFO is fine."""
-    from PyFlowBatt.analysis import get_assembled_resistance_ohm
+    from pyflowbatt.analysis import get_assembled_resistance_ohm
 
     raw_json = _make_raw_battinfo_json(resistance_value="25000", resistance_unit="unit:OHM")
     config = PyFlowBattConfig(assembled_resistance_ohm=25000.0)
@@ -506,7 +506,7 @@ def test_get_assembled_resistance_ohm_toml_wins_when_battinfo_agrees() -> None:
 
 def test_get_assembled_resistance_ohm_toml_battinfo_conflict_raises() -> None:
     """An explicit pyflowbatt.toml assembled_resistance_ohm disagreeing with BattINFO errors."""
-    from PyFlowBatt.analysis import get_assembled_resistance_ohm
+    from pyflowbatt.analysis import get_assembled_resistance_ohm
 
     raw_json = _make_raw_battinfo_json(resistance_value="25000", resistance_unit="unit:OHM")
     config = PyFlowBattConfig(assembled_resistance_ohm=9000.0)
@@ -520,7 +520,7 @@ def test_analyse_sample_uses_battinfo_resistance(
     """analyse_sample resolves the summary's Assembled resistance from BattINFO."""
     import pandas as pd
 
-    from PyFlowBatt import analysis as analysis_module
+    from pyflowbatt import analysis as analysis_module
 
     sample = tmp_path / "sample"
     sample.mkdir()
@@ -540,7 +540,7 @@ def test_analyse_sample_raises_on_toml_battinfo_resistance_conflict(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """analyse_sample raises when toml assembled_resistance_ohm disagrees with BattINFO."""
-    from PyFlowBatt import analysis as analysis_module
+    from pyflowbatt import analysis as analysis_module
 
     sample = tmp_path / "sample"
     sample.mkdir()
@@ -564,7 +564,7 @@ def test_area_cm2_passed_to_lsv_analyse(tmp_path: Path, monkeypatch: pytest.Monk
     """
     import pandas as pd
 
-    from PyFlowBatt import analysis as analysis_module
+    from pyflowbatt import analysis as analysis_module
 
     sample = tmp_path / "sample"
     sample.mkdir()
@@ -608,7 +608,7 @@ def _cv_analyse_defaults() -> dict:
     """Read the default kwarg values off cv.analyse's signature."""
     import inspect
 
-    from PyFlowBatt import cv as cv_module
+    from pyflowbatt import cv as cv_module
 
     sig = inspect.signature(cv_module.analyse)
     return {
@@ -620,7 +620,7 @@ def _cv_analyse_defaults() -> dict:
 
 def test_cv_config_defaults_match_cv_module() -> None:
     """Without a pyflowbatt.toml, the [cv] settings match cv.analyse's own defaults."""
-    from PyFlowBatt import cv as cv_module
+    from pyflowbatt import cv as cv_module
 
     config = PyFlowBattConfig()
     defaults = _cv_analyse_defaults()
@@ -664,7 +664,7 @@ def test_analyse_sample_passes_cv_config_to_cv_analyse(
     """analyse_sample threads the [cv] config values through to the real cv.analyse call."""
     import pandas as pd
 
-    from PyFlowBatt import analysis as analysis_module
+    from pyflowbatt import analysis as analysis_module
 
     sample = tmp_path / "sample"
     sample.mkdir()
@@ -731,7 +731,7 @@ def test_analyse_sample_summary_uses_custom_n_cycles(
     """analyse_sample's summary sheet reports exactly the configured summary_n_cycles."""
     import pandas as pd
 
-    from PyFlowBatt import analysis as analysis_module
+    from pyflowbatt import analysis as analysis_module
 
     sample = tmp_path / "sample"
     sample.mkdir()

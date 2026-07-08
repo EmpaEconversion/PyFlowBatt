@@ -12,9 +12,9 @@ import numpy as np
 import pandas as pd
 from battinfoconverter_backend import convert_excel_to_jsonld
 
-from PyFlowBatt import battinfo, cv, eis, gcpl, lsv, ocv
-from PyFlowBatt.config import DEFAULT_AREA_CM2, EIS_TAGS, PyFlowBattConfig, classify_technique_files
-from PyFlowBatt.read import read_to_bdf
+from pyflowbatt import battinfo, cv, eis, gcpl, lsv, ocv
+from pyflowbatt.config import DEFAULT_AREA_CM2, EIS_TAGS, PyFlowBattConfig, classify_technique_files
+from pyflowbatt.read import read_to_bdf
 
 logger = logging.getLogger(__name__)
 
@@ -214,7 +214,7 @@ def get_area_cm2(config: PyFlowBattConfig, raw_battinfo_json: dict | None = None
 
     Resolved in priority order: an explicit ``area_cm2`` set in pyflowbatt.toml, then the
     BattINFO file's positive/negative electrode Substrate Area (if both are present and
-    disagree, the smaller is used), then :data:`PyFlowBatt.config.DEFAULT_AREA_CM2`.
+    disagree, the smaller is used), then :data:`pyflowbatt.config.DEFAULT_AREA_CM2`.
 
     Raises ``ValueError`` if pyflowbatt.toml sets ``area_cm2`` and a BattINFO-derived area
     is also available and the two disagree.
@@ -849,7 +849,7 @@ def analyse_all_samples(
         workbook.close()
         logger.info("\n🎉 Combined all the results into one big summary")
 
-    from PyFlowBatt.rocrate_output import write_rocrate  # noqa: PLC0415
+    from pyflowbatt.rocrate_output import write_rocrate  # noqa: PLC0415
 
     write_rocrate(
         folder,

@@ -1,5 +1,5 @@
 [project]
-name = "PyFlowBatt"
+name = "pyflowbatt"
 dynamic = ["version"]
 description = "Tools for analysing data from the flow battery lab at Empa"
 readme = "README.md"
@@ -26,8 +26,8 @@ dev = [
 ]
 
 [project.scripts]
-pyflowbatt = "PyFlowBatt.cli:main"
-flussli = "PyFlowBatt.cli:main"
+pyflowbatt = "pyflowbatt.cli:main"
+flussli = "pyflowbatt.cli:main"
 
 [tool.ruff]
 line-length = 100  # Set the maximum line length
@@ -71,6 +71,6 @@ tag = true
 push = true
 
 [tool.bumpver.file_patterns]
-"PyFlowBatt/version.py" = [
+"pyflowbatt/version.py" = [
     '__version__ = "{pep440_version}"',
 ]

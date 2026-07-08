@@ -6,8 +6,8 @@ from pathlib import Path
 
 from rocrate.rocrate import ROCrate
 
-from PyFlowBatt.analysis import get_sampleid_from_folderpath
-from PyFlowBatt.config import PyFlowBattConfig, classify_technique_files
+from pyflowbatt.analysis import get_sampleid_from_folderpath
+from pyflowbatt.config import PyFlowBattConfig, classify_technique_files
 
 MEASUREMENT_LABELS: dict[str, str] = {
     "gcpl": "Galvanostatic Cycling with Potential Limitation",

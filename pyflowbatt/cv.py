@@ -13,7 +13,7 @@ import pandas as pd
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 
-from PyFlowBatt.read import read_to_bdf
+from pyflowbatt.read import read_to_bdf
 
 logger = logging.getLogger(__name__)
 

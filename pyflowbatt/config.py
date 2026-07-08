@@ -75,11 +75,11 @@ class PyFlowBattConfig:
     Config files are loaded in ascending priority order: `~/pyflowbatt.toml`
     (lab-wide defaults), the parent folder, then the sample folder itself.
 
-    If ``area_cm2`` is left unset, PyFlowBatt.analysis.get_area_cm2 falls back to the
+    If ``area_cm2`` is left unset, pyflowbatt.analysis.get_area_cm2 falls back to the
     electrode area recorded in a BattINFO metadata file (if present) before finally
     falling back to :data:`DEFAULT_AREA_CM2`.
 
-    If ``assembled_resistance_ohm`` is left unset, PyFlowBatt.analysis.get_assembled_resistance_ohm
+    If ``assembled_resistance_ohm`` is left unset, pyflowbatt.analysis.get_assembled_resistance_ohm
     falls back to an ElectricResistance measurement recorded in a BattINFO metadata file (if
     present) before finally falling back to parsing it out of a filename (e.g. ``..._25kOhm_...``).
     """
@@ -96,7 +96,7 @@ class PyFlowBattConfig:
     lsv_threshold: int = 8  # numeric cutoff for pre/post when only one LSV file is found
     area_cm2: float | None = None  # None lets BattINFO/default resolve it
     assembled_resistance_ohm: float | None = None  # None lets BattINFO/default resolve it
-    # [cv] table settings; defaults match PyFlowBatt.cv.analyse's own defaults
+    # [cv] table settings; defaults match pyflowbatt.cv.analyse's own defaults
     cv_v_min: float = 0.4004
     cv_v_max: float = 0.6
     cv_v_med: float = 0.5

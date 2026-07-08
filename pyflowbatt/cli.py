@@ -4,13 +4,13 @@ import argparse
 import logging
 from pathlib import Path
 
-from PyFlowBatt.config import CONFIG_FILENAME, write_template_config
+from pyflowbatt.config import CONFIG_FILENAME, write_template_config
 
 
 def init_config(folder: str | None = None) -> None:
     """Write a template pyflowbatt.toml into folder (default: current directory)."""
     folderpath = Path.cwd() if not folder else Path(folder)
-    logger = logging.getLogger("PyFlowBatt")
+    logger = logging.getLogger("pyflowbatt")
     logger.addHandler(logging.StreamHandler())
     logger.setLevel(logging.INFO)
 
@@ -31,10 +31,10 @@ def analyse(
     max_search_depth: int = 6,
 ) -> None:
     """Run PyFlowBatt on a folder."""
-    from PyFlowBatt.analysis import analyse_all_samples, dry_analyse_all_samples  # noqa: PLC0415
+    from pyflowbatt.analysis import analyse_all_samples, dry_analyse_all_samples  # noqa: PLC0415
 
     folderpath = Path.cwd() if not folder else Path(folder)
-    logger = logging.getLogger("PyFlowBatt")
+    logger = logging.getLogger("pyflowbatt")
     logger.addHandler(logging.StreamHandler())
     logger.setLevel(logging.INFO)
 
