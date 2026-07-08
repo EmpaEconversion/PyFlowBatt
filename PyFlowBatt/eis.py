@@ -6,7 +6,6 @@ EIS = electrochemical impedance spectroscopy.
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from impedance.models.circuits import CustomCircuit
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 
@@ -15,6 +14,8 @@ def analyse(
     df: pd.DataFrame,
 ) -> tuple[dict[str, dict], np.ndarray]:
     """Fit EIS to R-(R,CPE)-(R,CPE) model."""
+    from impedance.models.circuits import CustomCircuit  # noqa: PLC0415
+
     f = df["Frequency / Hz"]
     Z = df["Real Impedance / ohm"] + 1j * df["Imaginary Impedance / ohm"]
 
