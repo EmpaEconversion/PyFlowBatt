@@ -2,14 +2,14 @@
 
 from pathlib import Path
 
-import bdf
 import pandas as pd
-import yadg
 
 
 def read_to_bdf(file: str | Path) -> pd.DataFrame:
     """Read file into pandas dataframe with BDF columns."""
     if Path(file).suffix == ".mpr":
+        import yadg  # noqa: PLC0415
+
         df = yadg.extractors.extract("eclab.mpr", file).to_dataset().to_dataframe().reset_index()
         cols = set(df.columns)
         if not ({"I", "<I>"} & cols):
@@ -45,6 +45,8 @@ def read_to_bdf(file: str | Path) -> pd.DataFrame:
             df["step number"] = 1 + df["Ns changes"].cumsum()
 
         return _mpr_df_to_bdf(df)
+    import bdf  # noqa: PLC0415
+
     return bdf.read(file)
 
 
