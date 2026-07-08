@@ -741,7 +741,7 @@ def test_analyse_sample_summary_uses_custom_n_cycles(
     cycle_counts = list(range(1, 15))
     cycle_df = pd.DataFrame(
         {
-            "Total Cycle Count / 1": cycle_counts,
+            "Cycle Count / 1": cycle_counts,
             "Coulombic Efficiency / %": [95.0] * len(cycle_counts),
             "Energy Efficiency / %": [90.0] * len(cycle_counts),
             "Voltage Efficiency / %": [94.0] * len(cycle_counts),

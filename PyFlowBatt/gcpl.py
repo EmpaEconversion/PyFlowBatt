@@ -36,6 +36,7 @@ def analyse(filepaths: str | Path | list[str | Path]) -> tuple[pd.DataFrame, pd.
     dfs = []
     cycle_dfs = []
     total_cycles = 0
+    total_steps = 0
 
     # Read all the files
     dfs = [read_to_bdf(file) for file in filepaths]
@@ -52,6 +53,9 @@ def analyse(filepaths: str | Path | list[str | Path]) -> tuple[pd.DataFrame, pd.
             continue
         df["Total Cycle Count / 1"] = df["Cycle Count / 1"] + total_cycles
         total_cycles = df["Total Cycle Count / 1"].max()
+
+        df["Total Step Count / 1"] = df["Step Count / 1"] + total_steps
+        total_steps = df["Total Step Count / 1"].max()
 
         # Create dataframe with just cycle information
         cycle_df = df.groupby("Cycle Count / 1").first().index.to_frame()
@@ -105,6 +109,17 @@ def analyse(filepaths: str | Path | list[str | Path]) -> tuple[pd.DataFrame, pd.
     df = pd.concat(dfs)
     cycle_df = pd.concat(cycle_dfs)
 
+    # Rename total cycles to cycles
+    df = df.drop(columns="Cycle Count / 1").rename(
+        columns={"Total Cycle Count / 1": "Cycle Count / 1"}
+    )
+    df = df.drop(columns="Step Count / 1").rename(
+        columns={"Total Step Count / 1": "Step Count / 1"}
+    )
+    cycle_df = cycle_df.drop(columns="Cycle Count / 1").rename(
+        columns={"Total Cycle Count / 1": "Cycle Count / 1"}
+    )
+
     return df, cycle_df
 
 
@@ -120,7 +135,7 @@ def cycles_to_ratetest(cycle_df: pd.DataFrame) -> pd.DataFrame:
     ratetest_df = cycle_df.groupby(current_groups).agg(
         {
             "Average Current / A": ["mean"],
-            "Total Cycle Count / 1": ["first", "last"],
+            "Cycle Count / 1": ["first", "last"],
             "Discharge Capacity / mAh": ["mean", "std"],
             "Charge Capacity / mAh": ["mean", "std"],
             "Discharge Energy / mWh": ["mean", "std"],
@@ -151,7 +166,7 @@ def cycles_to_ratetest(cycle_df: pd.DataFrame) -> pd.DataFrame:
     return ratetest_df.rename(
         columns={
             "Average Current / A mean": "Average Current / A",
-            "Total Cycle Count / 1 first": "First cycle",
-            "Total Cycle Count / 1 last": "Last cycle",
+            "Cycle Count / 1 first": "First cycle",
+            "Cycle Count / 1 last": "Last cycle",
         },
     )

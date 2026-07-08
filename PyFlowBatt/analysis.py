@@ -560,7 +560,7 @@ def analyse_sample(
     )
 
     if cycle_df is not None:
-        mask = cycle_df["Total Cycle Count / 1"] == 1
+        mask = cycle_df["Cycle Count / 1"] == 1
         summary["1st CE / %"]["Value"] = float(
             cycle_df.loc[mask, "Coulombic Efficiency / %"].to_numpy()[0]
         )
@@ -571,10 +571,10 @@ def analyse_sample(
             cycle_df.loc[mask, "Voltage Efficiency / %"].to_numpy()[0]
         )
 
-        max_cycles = cycle_df["Total Cycle Count / 1"].max()
+        max_cycles = cycle_df["Cycle Count / 1"].max()
         for n in n_cycles:
             if n <= max_cycles:
-                mask = cycle_df["Total Cycle Count / 1"] <= n
+                mask = cycle_df["Cycle Count / 1"] <= n
                 summary[f"{n} cycles avg. CE / %"]["Value"] = float(
                     cycle_df.loc[mask, "Coulombic Efficiency / %"].mean()
                 )
