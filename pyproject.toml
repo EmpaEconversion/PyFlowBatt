@@ -1,3 +1,7 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "pyflowbatt"
 dynamic = ["version"]
@@ -28,6 +32,9 @@ dev = [
 [project.scripts]
 pyflowbatt = "pyflowbatt.cli:main"
 flussli = "pyflowbatt.cli:main"
+
+[tool.hatch.version]
+path = "pyflowbatt/version.py"
 
 [tool.ruff]
 line-length = 100  # Set the maximum line length
