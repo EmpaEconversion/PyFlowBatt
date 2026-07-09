@@ -74,4 +74,19 @@ def test_main_default_behavior_unchanged(monkeypatch: pytest.MonkeyPatch) -> Non
 
     cli.main()
 
-    assert called_with == {"folder": "somefolder", "dry": True}
+    assert called_with == {"folder": "somefolder", "dry": True, "zip_output": False}
+
+
+def test_main_zip_flag_dispatches_zip_output_true(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`pyflowbatt --zip --folder X` dispatches to analyse with zip_output=True."""
+    called_with: dict = {}
+
+    def fake_analyse(**kwargs: object) -> None:
+        called_with.update(kwargs)
+
+    monkeypatch.setattr(cli, "analyse", fake_analyse)
+    monkeypatch.setattr("sys.argv", ["pyflowbatt", "--zip", "--folder", "somefolder"])
+
+    cli.main()
+
+    assert called_with == {"folder": "somefolder", "dry": False, "zip_output": True}

@@ -482,14 +482,18 @@ def zenodo_record_id(zenodo_doi_url: str) -> str:
     return zenodo_doi_url.rsplit(".", maxsplit=1)[-1]
 
 
-def zenodo_file_id(
+def zenodo_download_url(
     root_rel_path: str,
     zenodo_doi_url: str | None,
     *,
     package: Literal["zip", "files"] = "files",
     zip_filename: str | None = None,
-) -> str:
-    """Build an @id for a file once it is uploaded to Zenodo.
+) -> str | None:
+    """Build the Zenodo download URL for a file, once it is uploaded to Zenodo.
+
+    This is the resolved *location* of the file (used for "dcat:downloadURL"),
+    kept separate from its "@id" (identity), which stays the bare root-relative
+    path everywhere so it matches the file's "@id" in the RO-Crate manifest.
 
     Args:
         root_rel_path: path to the file relative to the root folder that gets
@@ -505,12 +509,12 @@ def zenodo_file_id(
             package="zip").
 
     Returns:
-        A Zenodo URL identifying the file, or the bare root_rel_path if no
+        A Zenodo URL identifying the file's download location, or None if no
         zenodo_doi_url is given yet.
 
     """
     if not zenodo_doi_url:
-        return root_rel_path
+        return None
 
     record_id = zenodo_record_id(zenodo_doi_url)
     base = f"https://zenodo.org/records/{record_id}/files"
@@ -556,12 +560,15 @@ def add_input_data(
         media_type = "application/octet-stream"
 
     dist: dict = {
-        "@id": zenodo_file_id(
-            rel_file_path, zenodo_doi_url, package=package, zip_filename=zip_filename
-        ),
+        "@id": rel_file_path,
         "@type": "dcat:Distribution",
         "dcat:mediaType": media_type,
     }
+    download_url = zenodo_download_url(
+        rel_file_path, zenodo_doi_url, package=package, zip_filename=zip_filename
+    )
+    if download_url:
+        dist["dcat:downloadURL"] = download_url
     if comment:
         dist["rdfs:comment"] = comment
 
@@ -642,30 +649,51 @@ def add_data(
         msg = f"Unknown file type: {rel_file_path}"
         raise ValueError(msg)
 
+    dist: dict = {
+        "@id": rel_file_path,
+        "@type": "dcat:Distribution",
+        **additions,
+        **extras,
+    }
+    download_url = zenodo_download_url(
+        rel_file_path, zenodo_doi_url, package=package, zip_filename=zip_filename
+    )
+    if download_url:
+        dist["dcat:downloadURL"] = download_url
+
     return {
         "@type": "BatteryTest",
-        "hasOutput": {
-            "dcat:distribution": {
-                "@id": zenodo_file_id(
-                    rel_file_path, zenodo_doi_url, package=package, zip_filename=zip_filename
-                ),
-                "@type": "dcat:Distribution",
-                **additions,
-                **extras,
-            }
-        },
+        "hasOutput": {"dcat:distribution": dist},
     }
 
 
 def add_zenodo_url(
     zenodo_doi_url: str,
 ) -> dict:
-    """Add Zenodo URL to output section of json-ld output."""
+    """Add Zenodo URL to output section of json-ld output.
+
+    Also sets "@base" in the document's JSON-LD context to the Zenodo record's
+    URL. File "@id"s elsewhere in the document are bare root-relative paths
+    (matching the RO-Crate manifest's "@id"s); without a base IRI those are
+    only unique within this document. Anchoring them to the record URL makes
+    them resolve to globally unique absolute IRIs once expanded, so metadata
+    from different Zenodo records can be combined without "@id" collisions
+    (e.g. two records both having a file named "combined_summary.xlsx").
+
+    Deliberately record-scoped rather than zip-scoped: when one record has
+    multiple zips packaging the same underlying sample (e.g. a small
+    binary-format bundle and a larger csv bundle), files shared between them
+    (raw inputs, plots, summaries) are the same resource and should keep the
+    same "@id" - only the reachable "dcat:downloadURL" differs per zip.
+    """
+    record_id = zenodo_record_id(zenodo_doi_url)
+    base = f"https://zenodo.org/records/{record_id}/"
     return {
+        "@context": [{"@base": base}],
         "@type": "BatteryTest",
         "hasOutput": {
             "dcat:accessURL": zenodo_doi_url,
-            "dcat:endpointURL": f"https://zenodo.org/api/records/{zenodo_record_id(zenodo_doi_url)}",
+            "dcat:endpointURL": f"https://zenodo.org/api/records/{record_id}",
         },
     }
 

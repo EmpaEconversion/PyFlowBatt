@@ -370,9 +370,9 @@ def check_path_writable(path: Path) -> None:
 def zip_folder(root_folder: Path, zip_path: Path) -> Path:
     """Zip every file in root_folder into zip_path, with no wrapping top-level directory.
 
-    Archive members are root_folder-relative paths, matching the paths used for
-    BattINFO "@id"s (see :func:`pyflowbatt.battinfo.zenodo_file_id`), so a file's
-    "@id" fragment can be found directly inside the zip once it's extracted.
+    Archive members are root_folder-relative paths, matching the "@id"s used for
+    files in both the RO-Crate manifest and BattINFO metadata, so a file's "@id"
+    can be found directly inside the zip once it's extracted.
     """
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for file in sorted(root_folder.rglob("*")):
@@ -414,11 +414,16 @@ def analyse_sample(
     to ``folder`` itself). BattINFO metadata file paths are recorded relative to it, so
     that when there are multiple sample folders under one root, "@id"s stay unambiguous
     and match where the file actually sits once the root folder is packaged for Zenodo.
+    Every file's "@id" is this bare root-relative path, matching its "@id" in the
+    RO-Crate manifest (ro-crate-metadata.json); this deliberately never changes with
+    ``zenodo_package`` or Zenodo upload, so the two documents can be cross-referenced by
+    "@id" alone.
 
-    ``zenodo_package`` controls how BattINFO "@id"s reference Zenodo-hosted files:
-    "files" (default) points directly at each file's own Zenodo download URL (matching
-    an unzipped upload); "zip" points at one zip's Zenodo download URL with the
-    in-archive path as a fragment (see :func:`pyflowbatt.battinfo.zenodo_file_id`).
+    ``zenodo_package`` controls how the resolved "dcat:downloadURL" (a separate property
+    from "@id") points at Zenodo-hosted files, once ``pub_info["zenodo_doi_url"]`` is
+    known: "files" (default) points directly at each file's own Zenodo download URL
+    (matching an unzipped upload); "zip" points at one zip's Zenodo download URL with the
+    in-archive path as a fragment (see :func:`pyflowbatt.battinfo.zenodo_download_url`).
     """
     folder = Path(folder)
     root_folder = Path(root_folder) if root_folder is not None else folder

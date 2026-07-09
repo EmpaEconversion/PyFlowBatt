@@ -1,6 +1,7 @@
 """Tests for pyflowbatt.toml configuration and technique file classification."""
 
 import json
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -271,10 +272,25 @@ def _fake_convert(_file: Path) -> dict:
     }
 
 
-def test_analyse_sample_battinfo_ids_are_root_relative_not_sample_relative(
+def _all_download_urls(obj: object) -> set[str]:
+    """Recursively collect every "dcat:downloadURL" string value."""
+    found: set[str] = set()
+    if isinstance(obj, dict):
+        url_value = obj.get("dcat:downloadURL")
+        if isinstance(url_value, str):
+            found.add(url_value)
+        for v in obj.values():
+            found |= _all_download_urls(v)
+    elif isinstance(obj, list):
+        for item in obj:
+            found |= _all_download_urls(item)
+    return found
+
+
+def test_analyse_sample_default_package_is_files_and_root_relative(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """BattINFO @id file paths are relative to root_folder, not the sample folder."""
+    """Default zenodo_package="files": @id stays root-relative, downloadURL is per-file."""
     from pyflowbatt import analysis as analysis_module
 
     root = tmp_path / "project"
@@ -295,14 +311,21 @@ def test_analyse_sample_battinfo_ids_are_root_relative_not_sample_relative(
 
     metadata = json.loads((sample / "metadata.empa__fcid123456.json").read_text())
     ids = _all_ids(metadata)
-    assert any(i.endswith("#sample_01/metadata.xlsx") for i in ids)
-    assert not any(i.endswith("#metadata.xlsx") for i in ids)
+    assert "sample_01/metadata.xlsx" in ids
+
+    urls = _all_download_urls(metadata)
+    expected = "https://zenodo.org/records/20338409/files/sample_01/metadata.xlsx"
+    assert expected in urls
+
+    context = metadata["@context"]
+    local_terms = next(c for c in context if isinstance(c, dict))
+    assert local_terms["@base"] == "https://zenodo.org/records/20338409/"
 
 
 def test_analyse_sample_zip_package_id_points_at_zip_with_path_fragment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Default package="zip": @id is the zip's Zenodo download URL, path as a fragment."""
+    """zenodo_package="zip": @id stays root-relative, downloadURL is the zip with a fragment."""
     from pyflowbatt import analysis as analysis_module
 
     root = tmp_path / "project"
@@ -318,19 +341,33 @@ def test_analyse_sample_zip_package_id_points_at_zip_with_path_fragment(
         save_format=None,
         config=config,
         root_folder=root,
+        zenodo_package="zip",
         pub_info={"zenodo_doi_url": "https://doi.org/10.5281/zenodo.20338409"},
     )
 
     metadata = json.loads((sample / "metadata.empa__fcid123456.json").read_text())
     ids = _all_ids(metadata)
+    assert "sample_01/metadata.xlsx" in ids
+
+    urls = _all_download_urls(metadata)
     expected = "https://zenodo.org/records/20338409/files/project.zip#sample_01/metadata.xlsx"
-    assert expected in ids
+    assert expected in urls
+
+    context = metadata["@context"]
+    local_terms = next(c for c in context if isinstance(c, dict))
+    assert local_terms["@base"] == "https://zenodo.org/records/20338409/"
 
 
-def test_analyse_sample_files_package_id_is_direct_download_url(
+def test_analyse_sample_zip_package_base_shared_across_zips_in_one_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """package="files": @id is a direct per-file Zenodo download URL, no zip involved."""
+    """Two zips in the same record share "@base": it's scoped to the record, not the zip.
+
+    E.g. publishing the same sample as a small binary-format zip and a larger
+    csv zip under one Zenodo record: files shared between the two bundles
+    (raw inputs, plots, summaries) are the same resource, and should resolve
+    to the same "@id" once expanded - only "dcat:downloadURL" differs per zip.
+    """
     from pyflowbatt import analysis as analysis_module
 
     root = tmp_path / "project"
@@ -339,29 +376,36 @@ def test_analyse_sample_files_package_id_is_direct_download_url(
     (sample / "metadata.xlsx").write_text("x")
 
     monkeypatch.setattr(analysis_module, "convert_excel_to_jsonld", _fake_convert)
-
     config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
-    analysis_module.analyse_sample(
-        sample,
-        save_format=None,
-        config=config,
-        root_folder=root,
-        pub_info={
-            "zenodo_doi_url": "https://doi.org/10.5281/zenodo.20338409",
-            "zenodo_package": "files",
-        },
-    )
 
-    metadata = json.loads((sample / "metadata.empa__fcid123456.json").read_text())
-    ids = _all_ids(metadata)
-    expected = "https://zenodo.org/records/20338409/files/sample_01/metadata.xlsx"
-    assert expected in ids
+    bases = []
+    download_urls = []
+    for zip_filename in ("sample_01_parquet.zip", "sample_01_csv.zip"):
+        analysis_module.analyse_sample(
+            sample,
+            save_format=None,
+            config=config,
+            root_folder=root,
+            zenodo_package="zip",
+            pub_info={
+                "zenodo_doi_url": "https://doi.org/10.5281/zenodo.20338409",
+                "zenodo_zip_filename": zip_filename,
+            },
+        )
+        metadata = json.loads((sample / "metadata.empa__fcid123456.json").read_text())
+        assert "sample_01/metadata.xlsx" in _all_ids(metadata)
+        local_terms = next(c for c in metadata["@context"] if isinstance(c, dict))
+        bases.append(local_terms["@base"])
+        download_urls.append(_all_download_urls(metadata))
+
+    assert bases[0] == bases[1] == "https://zenodo.org/records/20338409/"
+    assert download_urls[0] != download_urls[1]
 
 
 def test_analyse_sample_no_zenodo_url_keeps_bare_relative_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """With no zenodo_doi_url yet, @id stays a plain root-relative path (no fake URL)."""
+    """With no zenodo_doi_url yet, @id stays a plain root-relative path, no downloadURL."""
     from pyflowbatt import analysis as analysis_module
 
     root = tmp_path / "project"
@@ -377,6 +421,24 @@ def test_analyse_sample_no_zenodo_url_keeps_bare_relative_path(
     metadata = json.loads((sample / "metadata.empa__fcid123456.json").read_text())
     ids = _all_ids(metadata)
     assert "sample_01/metadata.xlsx" in ids
+    assert not _all_download_urls(metadata)
+
+
+def test_zip_folder_uses_root_relative_arcnames_no_wrapping_directory(tmp_path: Path) -> None:
+    """zip_folder archives files under root-relative paths, matching BattINFO @id paths."""
+    from pyflowbatt.analysis import zip_folder
+
+    root = tmp_path / "project"
+    (root / "sample_01" / "results").mkdir(parents=True)
+    (root / "sample_01" / "results" / "gcpl.png").write_bytes(b"fake png")
+    (root / "combined_summary.xlsx").write_bytes(b"fake xlsx")
+
+    zip_path = tmp_path / "project.zip"
+    zip_folder(root, zip_path)
+
+    with zipfile.ZipFile(zip_path) as zf:
+        names = set(zf.namelist())
+    assert names == {"sample_01/results/gcpl.png", "combined_summary.xlsx"}
 
 
 def test_sample_id_custom_pattern(tmp_path: Path) -> None:
