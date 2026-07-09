@@ -486,7 +486,7 @@ def zenodo_file_id(
     root_rel_path: str,
     zenodo_doi_url: str | None,
     *,
-    package: Literal["zip", "files"] = "zip",
+    package: Literal["zip", "files"] = "files",
     zip_filename: str | None = None,
 ) -> str:
     """Build an @id for a file once it is uploaded to Zenodo.
@@ -528,7 +528,7 @@ def add_input_data(
     zenodo_doi_url: str | None,
     comment: str | None = None,
     *,
-    package: Literal["zip", "files"] = "zip",
+    package: Literal["zip", "files"] = "files",
     zip_filename: str | None = None,
 ) -> dict:
     """Add links to raw input files to the hasInput section of json-ld output.
@@ -579,7 +579,7 @@ def add_data(
     zenodo_doi_url: str | None,
     extras: dict | None = None,
     *,
-    package: Literal["zip", "files"] = "zip",
+    package: Literal["zip", "files"] = "files",
     zip_filename: str | None = None,
 ) -> dict:
     """Add links to data files to output section of json-ld output.
@@ -794,9 +794,10 @@ def parse_zenodo_info_xlsx(
     Returns:
         dict with zenodo info. The "General" sheet's rows are lowercased and
         underscored into keys, e.g. a "Zenodo Doi Url" row becomes "zenodo_doi_url".
-        Two optional rows configure how :func:`zenodo_file_id` builds file "@id"s:
-        "Zenodo Package" ("zip" or "files", default "zip") and "Zenodo Zip Filename"
-        (the zip's filename once uploaded to Zenodo, used when package is "zip").
+        An optional "Zenodo Zip Filename" row overrides the default zip filename
+        (``<root folder name>.zip``) used by :func:`zenodo_file_id` when the CLI's
+        ``--zip`` flag is used; whether "zip" or "files" packaging applies is decided
+        by that flag, not by anything in this sheet.
 
     """
     if isinstance(xlsx_file, Path):

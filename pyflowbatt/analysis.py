@@ -4,6 +4,7 @@ import contextlib
 import json
 import logging
 import re
+import zipfile
 from pathlib import Path
 from typing import Literal
 
@@ -257,6 +258,20 @@ def _rel(path: Path, root: Path) -> str:
     return path.relative_to(root).as_posix()
 
 
+def zip_folder(root_folder: Path, zip_path: Path) -> Path:
+    """Zip every file in root_folder into zip_path, with no wrapping top-level directory.
+
+    Archive members are root_folder-relative paths, matching the paths used for
+    BattINFO "@id"s (see :func:`pyflowbatt.battinfo.zenodo_file_id`), so a file's
+    "@id" fragment can be found directly inside the zip once it's extracted.
+    """
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for file in sorted(root_folder.rglob("*")):
+            if file.is_file():
+                zf.write(file, arcname=_rel(file, root_folder))
+    return zip_path
+
+
 def df_save_bdf(df: pd.DataFrame, filepath: Path, save_format: SAVE_FORMATS = "parquet") -> None:
     """Save df to file."""
     if save_format is None:
@@ -278,6 +293,7 @@ def analyse_sample(
     save_format: SAVE_FORMATS = "parquet",
     config: PyFlowBattConfig | None = None,
     root_folder: str | Path | None = None,
+    zenodo_package: Literal["zip", "files"] = "files",
 ) -> tuple[dict[str, list[Path]], dict[str, list[Path]], str | None, str]:
     """Read all the files in a folder, analayse and plot everything.
 
@@ -289,6 +305,11 @@ def analyse_sample(
     to ``folder`` itself). BattINFO metadata file paths are recorded relative to it, so
     that when there are multiple sample folders under one root, "@id"s stay unambiguous
     and match where the file actually sits once the root folder is packaged for Zenodo.
+
+    ``zenodo_package`` controls how BattINFO "@id"s reference Zenodo-hosted files:
+    "files" (default) points directly at each file's own Zenodo download URL (matching
+    an unzipped upload); "zip" points at one zip's Zenodo download URL with the
+    in-archive path as a fragment (see :func:`pyflowbatt.battinfo.zenodo_file_id`).
     """
     folder = Path(folder)
     root_folder = Path(root_folder) if root_folder is not None else folder
@@ -665,7 +686,6 @@ def analyse_sample(
 
     if battinfo_json is not None:
         zenodo_url = pub_info.get("zenodo_doi_url") if pub_info else None
-        zenodo_package = pub_info.get("zenodo_package") or "zip"
         zenodo_zip_filename = pub_info.get("zenodo_zip_filename") or f"{root_folder.name}.zip"
         for label, paths in tracked_mpr_inputs.items():
             for path in paths:
@@ -830,10 +850,19 @@ def analyse_all_samples(
     save_format: SAVE_FORMATS = "parquet",
     max_search_depth: int = DEFAULT_DEPTH,
     max_folder_searches: int = DEFAULT_SEARCH,
+    zip_output: bool = False,
 ) -> None:
-    """Take a folder and run all analysis."""
+    """Take a folder and run all analysis.
+
+    If ``zip_output`` is True, everything is zipped into a single zip file next to
+    ``folder`` once analysis finishes, and BattINFO "@id"s reference that zip's Zenodo
+    download URL with the in-archive path as a fragment. Otherwise (the default),
+    files are left unzipped and "@id"s reference each file's own Zenodo download URL
+    directly, for uploading every file individually.
+    """
     folder = Path(folder).resolve()
     pub_info = pub_info_from_root(folder)
+    zenodo_package: Literal["zip", "files"] = "zip" if zip_output else "files"
     search_config = PyFlowBattConfig.load(folder)
     sample_folders = find_all_sample_folders(
         folder, max_search_depth, max_folder_searches, search_config
@@ -862,6 +891,7 @@ def analyse_all_samples(
             pub_info=pub_info,
             config=configs_by_sample_folder[sample_folder],
             root_folder=folder,
+            zenodo_package=zenodo_package,
         )
 
     if len(sample_folders) > 1:
@@ -889,6 +919,12 @@ def analyse_all_samples(
         sample_ids_by_sample_folder,
     )
     logger.info("📦 Written RO-Crate metadata to %s", folder / "ro-crate-metadata.json")
+
+    if zip_output:
+        zip_filename = pub_info.get("zenodo_zip_filename") or f"{folder.name}.zip"
+        zip_path = folder.parent / zip_filename
+        zip_folder(folder, zip_path)
+        logger.info("🤐 Zipped everything into %s", zip_path)
 
 
 def dry_analyse_all_samples(
