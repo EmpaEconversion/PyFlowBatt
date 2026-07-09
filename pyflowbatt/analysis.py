@@ -822,8 +822,8 @@ def analyse_sample(
                     )
                     battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
         metadata_path = folder / f"metadata.{fcid or sample_id}.json"
-        with metadata_path.open("w") as mf:
-            json.dump(battinfo_json, mf, indent=4)
+        with metadata_path.open("w", encoding="utf-8") as mf:
+            json.dump(battinfo_json, mf, indent=4, ensure_ascii=False)
         tracked_outputs["metadata"] = [metadata_path]
 
     return tracked_outputs, tracked_extra_inputs, fcid, sample_id
