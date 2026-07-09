@@ -4,6 +4,7 @@ import contextlib
 import json
 import logging
 import re
+import uuid
 import zipfile
 from pathlib import Path
 from typing import Literal
@@ -343,6 +344,27 @@ def get_area_cm2(config: PyFlowBattConfig, raw_battinfo_json: dict | None = None
 def _rel(path: Path, root: Path) -> str:
     """Return a forward-slash relative path string from root."""
     return path.relative_to(root).as_posix()
+
+
+def check_path_writable(path: Path) -> None:
+    r"""Raise a clear ``PermissionError`` early if ``path`` can't be created.
+
+    Writing the zip only happens after the full analysis runs, so without this
+    check a permissions problem (e.g. ``path`` sitting directly in a drive root
+    like ``C:\``) only surfaces at the very end, wasting all that work.
+    """
+    probe = path.parent / f".pyflowbatt_write_test_{uuid.uuid4().hex}"
+    try:
+        probe.touch()
+    except OSError as e:
+        msg = (
+            f"Cannot write '{path.name}' to {path.parent}: {e}. "
+            r"Pick an output folder you have write access to (like documents, avoid C:\.), "
+            r"or run as administrator."
+        )
+        raise PermissionError(msg) from e
+    else:
+        probe.unlink()
 
 
 def zip_folder(root_folder: Path, zip_path: Path) -> Path:
@@ -961,6 +983,9 @@ def analyse_all_samples(
     folder = Path(folder).resolve()
     pub_info = pub_info_from_root(folder)
     zenodo_package: Literal["zip", "files"] = "zip" if zip_output else "files"
+    zip_filename = pub_info.get("zenodo_zip_filename") or f"{folder.name}.zip"
+    if zip_output:
+        check_path_writable(folder.parent / zip_filename)
     search_config = PyFlowBattConfig.load(folder)
     sample_folders = find_all_sample_folders(
         folder, max_search_depth, max_folder_searches, search_config
@@ -1019,7 +1044,6 @@ def analyse_all_samples(
     logger.info("📦 Written RO-Crate metadata to %s", folder / "ro-crate-metadata.json")
 
     if zip_output:
-        zip_filename = pub_info.get("zenodo_zip_filename") or f"{folder.name}.zip"
         zip_path = folder.parent / zip_filename
         zip_folder(folder, zip_path)
         logger.info("🤐 Zipped everything into %s", zip_path)
