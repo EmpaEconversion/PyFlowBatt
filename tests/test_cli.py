@@ -4,12 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from PyFlowBatt import cli
+from pyflowbatt import cli
 
 
 def test_init_config_writes_template(tmp_path: Path) -> None:
     """`pyflowbatt init --folder X` writes a template pyflowbatt.toml into X."""
-    from PyFlowBatt.config import TEMPLATE_TOML
+    from pyflowbatt.config import TEMPLATE_TOML
 
     cli.init_config(folder=str(tmp_path))
 
@@ -30,7 +30,7 @@ def test_init_config_refuses_to_overwrite(tmp_path: Path, caplog: pytest.LogCapt
     existing = tmp_path / "pyflowbatt.toml"
     existing.write_text("area_cm2 = 42\n")
 
-    with caplog.at_level("ERROR", logger="PyFlowBatt"):
+    with caplog.at_level("ERROR", logger="pyflowbatt"):
         cli.init_config(folder=str(tmp_path))
 
     assert existing.read_text() == "area_cm2 = 42\n"
@@ -74,4 +74,19 @@ def test_main_default_behavior_unchanged(monkeypatch: pytest.MonkeyPatch) -> Non
 
     cli.main()
 
-    assert called_with == {"folder": "somefolder", "dry": True}
+    assert called_with == {"folder": "somefolder", "dry": True, "zip_output": False}
+
+
+def test_main_zip_flag_dispatches_zip_output_true(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`pyflowbatt --zip --folder X` dispatches to analyse with zip_output=True."""
+    called_with: dict = {}
+
+    def fake_analyse(**kwargs: object) -> None:
+        called_with.update(kwargs)
+
+    monkeypatch.setattr(cli, "analyse", fake_analyse)
+    monkeypatch.setattr("sys.argv", ["pyflowbatt", "--zip", "--folder", "somefolder"])
+
+    cli.main()
+
+    assert called_with == {"folder": "somefolder", "dry": False, "zip_output": True}

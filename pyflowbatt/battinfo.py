@@ -8,6 +8,7 @@ from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
+from urllib.parse import quote
 
 import pandas as pd
 
@@ -349,7 +350,7 @@ def dedupe_jsonld_list(lst: list) -> list:
 
 
 def make_test_object(battinfo_jsonld: dict) -> dict:
-    """Put BattINFO coin cell description inside a BatteryTest object."""
+    """Put BattINFO redox flow battery description inside a BatteryTest object."""
     if battinfo_jsonld.get("@type") == "RedoxFlowBattery":
         return {
             "@context": battinfo_jsonld.pop("@context"),
@@ -368,6 +369,7 @@ def add_input_and_output() -> dict:
         "@type": "BatteryTest",
         "hasOutput": {
             "@type": ["BatteryTestResult", "dcat:Dataset"],
+            "dcat:keyword": ["battery", "redox flow battery"],
             "dcterms:license": {"@id": "https://creativecommons.org/licenses/by/4.0/"},
             "dcterms:issued": datetime.now().date().isoformat(),  # noqa: DTZ005
             "schema:datePublished": datetime.now().date().isoformat(),  # noqa: DTZ005
@@ -459,41 +461,89 @@ def generate_battery_test(ontologized_protocols: dict | list[dict]) -> dict:
     }
 
 
-def generate_basic_output_jsonld() -> dict:
-    """Generate basic 'hasOutput' key for BatteryTest."""
-    return {
-        "@type": "BatteryTest",
-        "hasOutput": {
-            "@type": ["BatteryTestResult", "dcat:Dataset"],
-            "dcat:keyword": ["battery", "R2032", "coin cell"],
-        },
-    }
-
-
-def add_ccid_output(
-    ccid: str,
+def add_fcid_output(
+    fcid: str,
 ) -> dict:
-    """Add CCID to output section of json-ld output."""
+    """Add FCID to output section of json-ld output."""
     return {
         "@type": "BatteryTest",
         "hasOutput": {
-            "dcterms:title": f"Cycling data coin cell {ccid}",
-            "dcterms:description": f"Cycling data coin cell {ccid}",
+            "dcterms:title": f"Cycling data redox flow battery {fcid}",
+            "dcterms:description": f"Cycling data redox flow battery {fcid}",
         },
     }
+
+
+def zenodo_record_id(zenodo_doi_url: str) -> str:
+    """Extract the numeric Zenodo record ID from a Zenodo DOI URL.
+
+    e.g. "https://doi.org/10.5281/zenodo.20338409" -> "20338409"
+    """
+    return zenodo_doi_url.rsplit(".", maxsplit=1)[-1]
+
+
+def zenodo_download_url(
+    root_rel_path: str,
+    zenodo_doi_url: str | None,
+    *,
+    package: Literal["zip", "files"] = "files",
+    zip_filename: str | None = None,
+) -> str | None:
+    """Build the Zenodo download URL for a file, once it is uploaded to Zenodo.
+
+    This is the resolved *location* of the file (used for "dcat:downloadURL"),
+    kept separate from its "@id" (identity), which stays the bare root-relative
+    path everywhere so it matches the file's "@id" in the RO-Crate manifest.
+
+    Args:
+        root_rel_path: path to the file relative to the root folder that gets
+            uploaded to Zenodo, e.g. sample_01/results/eis_post.bdf.parquet
+        zenodo_doi_url: Zenodo archive DOI URL, e.g. https://doi.org/10.5281/zenodo.12345678
+        package: "zip" if the whole root folder is uploaded as a single zip (Zenodo
+            has no URL that deep-links into a file inside that zip, so the fragment
+            after "#" is only useful once the zip has been downloaded and extracted),
+            or "files" if every file is uploaded individually, preserving the folder
+            structure in the file's Zenodo "key" (in which case a direct download URL
+            can be built for it).
+        zip_filename: name of the zip file as uploaded to Zenodo (required when
+            package="zip").
+
+    Returns:
+        A Zenodo URL identifying the file's download location, or None if no
+        zenodo_doi_url is given yet.
+
+    """
+    if not zenodo_doi_url:
+        return None
+
+    record_id = zenodo_record_id(zenodo_doi_url)
+    base = f"https://zenodo.org/records/{record_id}/files"
+    if package == "files":
+        return f"{base}/{quote(root_rel_path, safe='/')}"
+
+    if not zip_filename:
+        msg = "zip_filename is required when package='zip'"
+        raise ValueError(msg)
+    return f"{base}/{quote(zip_filename, safe='')}#{root_rel_path}"
 
 
 def add_input_data(
     rel_file_path: str,
     zenodo_doi_url: str | None,
     comment: str | None = None,
+    *,
+    package: Literal["zip", "files"] = "files",
+    zip_filename: str | None = None,
 ) -> dict:
     """Add links to raw input files to the hasInput section of json-ld output.
 
     Args:
-        rel_file_path: relative path to file, e.g. cell01_GCPL_01.mpr
+        rel_file_path: path to file relative to the root folder uploaded to Zenodo,
+            e.g. sample_01/cell01_GCPL_01.mpr
         zenodo_doi_url: optional Zenodo archive URL
         comment: human-readable description of what this file is
+        package: see :func:`zenodo_file_id`
+        zip_filename: see :func:`zenodo_file_id`
 
     Returns:
         dict with "BatteryTest" as top level type.
@@ -510,10 +560,15 @@ def add_input_data(
         media_type = "application/octet-stream"
 
     dist: dict = {
-        "@id": f"{zenodo_doi_url}#{rel_file_path}" if zenodo_doi_url else rel_file_path,
+        "@id": rel_file_path,
         "@type": "dcat:Distribution",
         "dcat:mediaType": media_type,
     }
+    download_url = zenodo_download_url(
+        rel_file_path, zenodo_doi_url, package=package, zip_filename=zip_filename
+    )
+    if download_url:
+        dist["dcat:downloadURL"] = download_url
     if comment:
         dist["rdfs:comment"] = comment
 
@@ -530,13 +585,19 @@ def add_data(
     rel_file_path: str,
     zenodo_doi_url: str | None,
     extras: dict | None = None,
+    *,
+    package: Literal["zip", "files"] = "files",
+    zip_filename: str | None = None,
 ) -> dict:
     """Add links to data files to output section of json-ld output.
 
     Args:
-        rel_file_path: relative path to file, e.g. empa__ccid01345/empa__ccid01345.bdf.parquet
+        rel_file_path: path to file relative to the root folder uploaded to Zenodo,
+            e.g. empa__fcid01345/empa__fcid01345.bdf.parquet
         zenodo_doi_url: path to zenodo archive e.g. https://doi.org/10.1234/zenodo.12345678
         extras: dict with any extra terms to include in metadata
+        package: see :func:`zenodo_file_id`
+        zip_filename: see :func:`zenodo_file_id`
 
     Returns:
         dict with "BatteryTest" as top level type.
@@ -549,6 +610,10 @@ def add_data(
             "csvw:tableSchema": "https://w3id.org/battery-data-alliance/ontology/battery-data-format/schema",
             "rdfs:comment": "Time series electrochemical data using Battery Data Format (bdf) columns",
         }
+        if "eis." in rel_file_path:
+            additions["rdfs:comment"] = (
+                "Frequency-domain electrochemical data using Battery Data Format (bdf) columns"
+            )
     elif rel_file_path.endswith(".csv"):
         additions = {
             "dcat:mediaType": "text/csv",
@@ -556,6 +621,10 @@ def add_data(
             "csvw:dialect": {"@type": "csvw:Dialect", "csvw:delimiter": ",", "csvw:skipRows": 0},
             "rdfs:comment": "Time series electrochemical data using Battery Data Format (bdf) columns",
         }
+        if "eis" in rel_file_path:
+            additions["rdfs:comment"] = (
+                "Frequency-domain electrochemical data using Battery Data Format (bdf) columns"
+            )
     elif rel_file_path.endswith(".json"):
         additions = {
             "dcat:mediaType": "application/json",
@@ -580,28 +649,51 @@ def add_data(
         msg = f"Unknown file type: {rel_file_path}"
         raise ValueError(msg)
 
+    dist: dict = {
+        "@id": rel_file_path,
+        "@type": "dcat:Distribution",
+        **additions,
+        **extras,
+    }
+    download_url = zenodo_download_url(
+        rel_file_path, zenodo_doi_url, package=package, zip_filename=zip_filename
+    )
+    if download_url:
+        dist["dcat:downloadURL"] = download_url
+
     return {
         "@type": "BatteryTest",
-        "hasOutput": {
-            "dcat:distribution": {
-                "@id": f"{zenodo_doi_url}#{rel_file_path}" if zenodo_doi_url else rel_file_path,
-                "@type": "dcat:Distribution",
-                **additions,
-                **extras,
-            }
-        },
+        "hasOutput": {"dcat:distribution": dist},
     }
 
 
 def add_zenodo_url(
     zenodo_doi_url: str,
 ) -> dict:
-    """Add Zenodo URL to output section of json-ld output."""
+    """Add Zenodo URL to output section of json-ld output.
+
+    Also sets "@base" in the document's JSON-LD context to the Zenodo record's
+    URL. File "@id"s elsewhere in the document are bare root-relative paths
+    (matching the RO-Crate manifest's "@id"s); without a base IRI those are
+    only unique within this document. Anchoring them to the record URL makes
+    them resolve to globally unique absolute IRIs once expanded, so metadata
+    from different Zenodo records can be combined without "@id" collisions
+    (e.g. two records both having a file named "combined_summary.xlsx").
+
+    Deliberately record-scoped rather than zip-scoped: when one record has
+    multiple zips packaging the same underlying sample (e.g. a small
+    binary-format bundle and a larger csv bundle), files shared between them
+    (raw inputs, plots, summaries) are the same resource and should keep the
+    same "@id" - only the reachable "dcat:downloadURL" differs per zip.
+    """
+    record_id = zenodo_record_id(zenodo_doi_url)
+    base = f"https://zenodo.org/records/{record_id}/"
     return {
+        "@context": [{"@base": base}],
         "@type": "BatteryTest",
         "hasOutput": {
             "dcat:accessURL": zenodo_doi_url,
-            "dcat:endpointURL": f"https://zenodo.org/api/records/{zenodo_doi_url.rsplit('.', maxsplit=1)[-1]}",
+            "dcat:endpointURL": f"https://zenodo.org/api/records/{record_id}",
         },
     }
 
@@ -609,12 +701,12 @@ def add_zenodo_url(
 def add_associated_media(
     paper_doi_url: str | None,
     sample_to_fig: dict,
-    ccid: str | None,
+    fcid: str | None,
     sample_id: str | None,
 ) -> dict:
     """Add associated media to output section of json-ld output."""
     figs = [
-        v for k, v in sample_to_fig.items() if k in (sample_id, ccid)
+        v for k, v in sample_to_fig.items() if k in (sample_id, fcid)
     ]  # e.g. ["Fig. 3a", "Fig. 3b"]
     if not figs:
         return {"@type": "BatteryTest"}
@@ -702,19 +794,21 @@ def add_authors(
 
 def add_institution(
     name: str = "Empa",
-    wikidata_url: str = "https://www.wikidata.org/wiki/Q683116",
+    wikidata_url: str | None = None,
 ) -> dict:
     """Add publishing details to output section of json-ld."""
-    return {
+    inst_dict = {
         "@type": "BatteryTest",
         "hasOutput": {
             "dc:publisher": {
                 "@type": "schema:ResearchOrganization",
-                "@id": wikidata_url,
-                "schema:name": name,
             },
         },
     }
+    if wikidata_url:
+        inst_dict["hasOutput"]["dc:publisher"]["@id"] = wikidata_url
+    inst_dict["hasOutput"]["dc:publisher"]["schema:name"] = name
+    return inst_dict
 
 
 def parse_zenodo_info_xlsx(
@@ -726,7 +820,12 @@ def parse_zenodo_info_xlsx(
         xlsx_file: Path to a file, a content string from upload button
 
     Returns:
-        dict with zenodo info
+        dict with zenodo info. The "General" sheet's rows are lowercased and
+        underscored into keys, e.g. a "Zenodo Doi Url" row becomes "zenodo_doi_url".
+        An optional "Zenodo Zip Filename" row overrides the default zip filename
+        (``<root folder name>.zip``) used by :func:`zenodo_file_id` when the CLI's
+        ``--zip`` flag is used; whether "zip" or "files" packaging applies is decided
+        by that flag, not by anything in this sheet.
 
     """
     if isinstance(xlsx_file, Path):

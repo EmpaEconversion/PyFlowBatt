@@ -4,13 +4,13 @@ import argparse
 import logging
 from pathlib import Path
 
-from PyFlowBatt.config import CONFIG_FILENAME, write_template_config
+from pyflowbatt.config import CONFIG_FILENAME, write_template_config
 
 
 def init_config(folder: str | None = None) -> None:
     """Write a template pyflowbatt.toml into folder (default: current directory)."""
     folderpath = Path.cwd() if not folder else Path(folder)
-    logger = logging.getLogger("PyFlowBatt")
+    logger = logging.getLogger("pyflowbatt")
     logger.addHandler(logging.StreamHandler())
     logger.setLevel(logging.INFO)
 
@@ -27,14 +27,15 @@ def analyse(
     folder: str | None = None,
     *,
     dry: bool = False,
+    zip_output: bool = False,
     max_folder_searches: int = 10000,
     max_search_depth: int = 6,
 ) -> None:
     """Run PyFlowBatt on a folder."""
-    from PyFlowBatt.analysis import analyse_all_samples, dry_analyse_all_samples  # noqa: PLC0415
+    from pyflowbatt.analysis import analyse_all_samples, dry_analyse_all_samples  # noqa: PLC0415
 
     folderpath = Path.cwd() if not folder else Path(folder)
-    logger = logging.getLogger("PyFlowBatt")
+    logger = logging.getLogger("pyflowbatt")
     logger.addHandler(logging.StreamHandler())
     logger.setLevel(logging.INFO)
 
@@ -47,12 +48,14 @@ def analyse(
             folderpath,
             max_folder_searches=max_folder_searches,
             max_search_depth=max_search_depth,
+            zip_output=zip_output,
         )
     else:
         analyse_all_samples(
             folderpath,
             max_folder_searches=max_folder_searches,
             max_search_depth=max_search_depth,
+            zip_output=zip_output,
         )
 
 
@@ -78,6 +81,16 @@ def main() -> None:
         "--folder", type=str, help="Folder to analyse, if not specified, analyse current folder"
     )
     parser.add_argument(
+        "--zip",
+        action="store_true",
+        help=(
+            "Zip the analysed folder afterwards and reference files in BattINFO metadata via "
+            "the zip's Zenodo download URL (for uploading one zip). Default: leave files "
+            "unzipped and reference each one via its own Zenodo download URL (for uploading "
+            "every file individually)."
+        ),
+    )
+    parser.add_argument(
         "--max-folder-searches",
         type=int,
         help="Maximum number of folders that can be checked when looking for sample folders",
@@ -98,7 +111,7 @@ def main() -> None:
         kwargs["max_folder_searches"] = args.max_folder_searches
     if args.max_search_depth is not None:
         kwargs["max_search_depth"] = args.max_search_depth
-    analyse(folder=args.folder, dry=args.dry, **kwargs)
+    analyse(folder=args.folder, dry=args.dry, zip_output=args.zip, **kwargs)
 
 
 if __name__ == "__main__":

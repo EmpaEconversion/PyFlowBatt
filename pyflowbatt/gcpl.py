@@ -5,15 +5,12 @@ i.e. constant-current-constant-voltage cycling.
 """
 
 import logging
-from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
-
-from PyFlowBatt.read import read_to_bdf
 
 logger = logging.getLogger(__name__)
 
@@ -58,17 +55,13 @@ def plot(df: pd.DataFrame, cycle_df: pd.DataFrame) -> tuple[Figure, list[Axes]]:
     return fig, axs
 
 
-def analyse(filepaths: str | Path | list[str | Path]) -> tuple[pd.DataFrame, pd.DataFrame]:
+def analyse(dfs: pd.DataFrame | list[pd.DataFrame]) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Take a list of GCPL files and return a time-series dataframe, and a per-cycle dataframe."""
-    if not isinstance(filepaths, list):
-        filepaths = [filepaths]
-    dfs = []
+    if not isinstance(dfs, list):
+        dfs = [dfs]
     cycle_dfs = []
     total_cycles = 0
     total_steps = 0
-
-    # Read all the files
-    dfs = [read_to_bdf(file) for file in filepaths]
 
     # Reorder based on index
     start_times = [df["Unix Time / s"].iloc[0] for df in dfs]

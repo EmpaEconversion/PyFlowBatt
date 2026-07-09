@@ -3,15 +3,12 @@
 OCV = open circuit voltage.
 """
 
-from pathlib import Path
-
-from PyFlowBatt.read import read_to_bdf
+import pandas as pd
 
 
-def analyse(file: str | Path) -> tuple[float, float]:
+def analyse(df: pd.DataFrame) -> tuple[float, float]:
     """Get the average OCV from an MPR OCV file. Returns mean and standard deviation."""
-    df = read_to_bdf(file)
     if "Voltage / V" in df.columns:
         return float(df["Voltage / V"].mean()), float(df["Voltage / V"].std())
-    msg = f"Could not find voltage column in {file}."
+    msg = "Could not find voltage column for OCV."
     raise ValueError(msg)

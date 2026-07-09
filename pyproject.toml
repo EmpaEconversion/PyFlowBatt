@@ -1,5 +1,9 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
-name = "PyFlowBatt"
+name = "pyflowbatt"
 dynamic = ["version"]
 description = "Tools for analysing data from the flow battery lab at Empa"
 readme = "README.md"
@@ -11,7 +15,6 @@ dependencies = [
     "matplotlib>=3.10.6",
     "pandas>=2.3.2",
     "pyarrow>=21.0.0",
-    "tqdm>=4.67.1",
     "xlsxwriter>=3.2.9",
     "rocrate>=0.9",
     "yadg>=6.2.2,<7.0.0",
@@ -27,8 +30,11 @@ dev = [
 ]
 
 [project.scripts]
-pyflowbatt = "PyFlowBatt.cli:main"
-flussli = "PyFlowBatt.cli:main"
+pyflowbatt = "pyflowbatt.cli:main"
+flussli = "pyflowbatt.cli:main"
+
+[tool.hatch.version]
+path = "pyflowbatt/version.py"
 
 [tool.ruff]
 line-length = 100  # Set the maximum line length
@@ -72,6 +78,6 @@ tag = true
 push = true
 
 [tool.bumpver.file_patterns]
-"PyFlowBatt/version.py" = [
+"pyflowbatt/version.py" = [
     '__version__ = "{pep440_version}"',
 ]

@@ -6,8 +6,15 @@ from pathlib import Path
 
 from rocrate.rocrate import ROCrate
 
-from PyFlowBatt.analysis import get_sampleid_from_folderpath
-from PyFlowBatt.config import PyFlowBattConfig, classify_technique_files
+from pyflowbatt.analysis import (
+    EXTRA_INPUT_DESCRIPTIONS,
+    OUTPUT_DATA_DESCRIPTIONS,
+    OUTPUT_MISC_DESCRIPTIONS,
+    OUTPUT_PLOT_DESCRIPTIONS,
+    _rel,
+    get_sampleid_from_folderpath,
+)
+from pyflowbatt.config import PyFlowBattConfig, classify_technique_files
 
 MEASUREMENT_LABELS: dict[str, str] = {
     "gcpl": "Galvanostatic Cycling with Potential Limitation",
@@ -30,24 +37,18 @@ ENCODING_FORMATS: dict[str, str] = {
     ".mpr": "application/octet-stream",
 }
 
-OUTPUT_DESCRIPTIONS: dict[str, str] = {
-    "gcpl": "Galvanostatic cycling analysis",
-    "lsv_pre": "Pre-cycling linear sweep voltammetry analysis",
-    "lsv_post": "Post-cycling linear sweep voltammetry analysis",
-    "cv_pre": "Pre-cycling cyclic voltammetry analysis",
-    "cv_post": "Post-cycling cyclic voltammetry analysis",
-    "eis_pre": "EIS analysis, pre-cycling at 0% SOC",
-    "eis_pre-50%SOC": "EIS analysis, pre-cycling at 50% SOC",
-    "eis_post-50%SOC": "EIS analysis, post-cycling at 50% SOC",
-    "eis_post": "EIS analysis, post-cycling at 0% SOC",
-    "summary": "Per-sample analysis summary",
-    "metadata": "BattINFO JSON-LD metadata",
-}
 
-EXTRA_INPUT_DESCRIPTIONS: dict[str, str] = {
-    "protocol": "EC-Lab measurement protocol (.mps)",
-    "battinfo_xlsx": "BattINFO metadata input",
-}
+def _output_description(label: str, path: Path) -> str | None:
+    """Pick the description for a tracked output, by label and file type.
+
+    Shared with the descriptions `analyse_sample` writes into BattINFO JSON-LD,
+    so a plot and its companion data file get distinct, consistent wording.
+    """
+    if path.suffix == ".png":
+        return OUTPUT_PLOT_DESCRIPTIONS.get(label)
+    if path.suffix in (".parquet", ".csv"):
+        return OUTPUT_DATA_DESCRIPTIONS.get(label)
+    return OUTPUT_MISC_DESCRIPTIONS.get(label)
 
 
 def _classify_inputs(
@@ -62,11 +63,6 @@ def _classify_inputs(
     """
     config = config or PyFlowBattConfig.load(sample_folder)
     return classify_technique_files(sample_folder, config)
-
-
-def _rel(path: Path, root: Path) -> str:
-    """Return a forward-slash relative path string from root."""
-    return path.relative_to(root).as_posix()
 
 
 def write_rocrate(
@@ -162,7 +158,6 @@ def write_rocrate(
                 derived_from = extra_entities.get("battinfo_xlsx") or None
             else:
                 derived_from = input_entities.get(label) or all_input_entities or None
-            desc = OUTPUT_DESCRIPTIONS.get(label)
             for path in paths:
                 if not path.exists():
                     continue
@@ -175,6 +170,7 @@ def write_rocrate(
                     "encodingFormat": fmt,
                     "wasDerivedFrom": derived_from,
                 }
+                desc = _output_description(label, path)
                 if desc:
                     props["description"] = desc
                 output_ent = crate.add_file(

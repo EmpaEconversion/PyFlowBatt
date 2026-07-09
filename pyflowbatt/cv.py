@@ -5,15 +5,12 @@ CVA = Cyclic Voltammetry Advanced (EC-lab technique)
 """
 
 import logging
-from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
-
-from PyFlowBatt.read import read_to_bdf
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +44,7 @@ def _get_capacitance_from_cv(cv_df: pd.DataFrame) -> tuple[float, float, float]:
 
 
 def analyse(
-    filepath: Path | str,
+    df: pd.DataFrame,
     v_min: float = 0.4004,
     v_max: float = 0.6,
     v_med: float = 0.5,
@@ -55,8 +52,6 @@ def analyse(
     min_r2: float = MIN_R2,
 ) -> tuple[pd.DataFrame, pd.DataFrame, float | None]:
     """Analyse cyclic voltammetry data, find capacitance from scan-rate vs current difference."""
-    df = read_to_bdf(filepath)
-
     results = []
     cycle = 1
     df["Scan rate / V s⁻¹"] = 0.0

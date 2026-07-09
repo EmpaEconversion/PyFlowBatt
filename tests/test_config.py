@@ -1,11 +1,13 @@
 """Tests for pyflowbatt.toml configuration and technique file classification."""
 
+import json
+import zipfile
 from pathlib import Path
 
 import pytest
 
-from PyFlowBatt.config import PyFlowBattConfig, classify_technique_files
-from PyFlowBatt.rocrate_output import _classify_inputs
+from pyflowbatt.config import PyFlowBattConfig, classify_technique_files
+from pyflowbatt.rocrate_output import _classify_inputs
 
 # Synthetic filename scheme mirroring real EC-Lab exports: <prefix>_<num>_<TECHNIQUE>_<tail>.<ext>
 # Sizes are included as the largest GCPL is used as cycling.
@@ -106,7 +108,7 @@ def test_shared_classifier_used_by_rocrate(tmp_path: Path) -> None:
 
 def test_sample_id_explicit_override(tmp_path: Path) -> None:
     """sample_name in pyflowbatt.toml overrides detection, regardless of folder name."""
-    from PyFlowBatt.analysis import get_sampleid_from_folderpath
+    from pyflowbatt.analysis import get_sampleid_from_folderpath
 
     # A folder name that would NOT match the default sample-ID regex.
     sample_dir = tmp_path / "not-a-normal-sample-name"
@@ -119,7 +121,7 @@ def test_sample_id_explicit_override(tmp_path: Path) -> None:
 
 def test_sample_id_battinfo_name_used_when_no_toml_override(tmp_path: Path) -> None:
     """With no pyflowbatt.toml sample_name set, a BattINFO name wins over the folder name."""
-    from PyFlowBatt.analysis import get_sampleid_from_folderpath
+    from pyflowbatt.analysis import get_sampleid_from_folderpath
 
     # A folder name that would NOT match the default sample-ID regex.
     sample_dir = tmp_path / "not-a-normal-sample-name"
@@ -134,7 +136,7 @@ def test_sample_id_battinfo_name_used_when_no_toml_override(tmp_path: Path) -> N
 
 def test_sample_id_toml_wins_over_battinfo_when_they_agree(tmp_path: Path) -> None:
     """A pyflowbatt.toml sample_name matching the BattINFO name is accepted, no error."""
-    from PyFlowBatt.analysis import get_sampleid_from_folderpath
+    from pyflowbatt.analysis import get_sampleid_from_folderpath
 
     sample_dir = tmp_path / "sample"
     sample_dir.mkdir()
@@ -149,7 +151,7 @@ def test_sample_id_toml_wins_over_battinfo_when_they_agree(tmp_path: Path) -> No
 
 def test_sample_id_toml_battinfo_conflict_raises(tmp_path: Path) -> None:
     """A pyflowbatt.toml sample_name that disagrees with the BattINFO name is an error."""
-    from PyFlowBatt.analysis import get_sampleid_from_folderpath
+    from pyflowbatt.analysis import get_sampleid_from_folderpath
 
     sample_dir = tmp_path / "sample"
     sample_dir.mkdir()
@@ -164,7 +166,7 @@ def test_analyse_sample_uses_battinfo_fcid_without_toml(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """analyse_sample resolves sample_name from BattINFO when pyflowbatt.toml doesn't set one."""
-    from PyFlowBatt import analysis as analysis_module
+    from pyflowbatt import analysis as analysis_module
 
     # A folder name that would NOT match the default sample-ID regex.
     sample = tmp_path / "not-a-normal-sample-name"
@@ -194,7 +196,7 @@ def test_analyse_sample_uses_battinfo_name_without_toml_fcid(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """analyse_sample resolves sample_name from BattINFO when pyflowbatt.toml doesn't set one."""
-    from PyFlowBatt import analysis as analysis_module
+    from pyflowbatt import analysis as analysis_module
 
     # A folder name that would NOT match the default sample-ID regex.
     sample = tmp_path / "not-a-normal-sample-name"
@@ -224,7 +226,7 @@ def test_analyse_sample_raises_on_toml_battinfo_conflict(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """analyse_sample raises when pyflowbatt.toml sample_name disagrees with BattINFO's name."""
-    from PyFlowBatt import analysis as analysis_module
+    from pyflowbatt import analysis as analysis_module
 
     sample = tmp_path / "sample"
     sample.mkdir()
@@ -246,9 +248,202 @@ def test_analyse_sample_raises_on_toml_battinfo_conflict(
         analysis_module.analyse_sample(sample, save_format=None, config=config)
 
 
+def _all_ids(obj: object) -> set[str]:
+    """Recursively collect every "@id" string value in a JSON-LD-like structure."""
+    found: set[str] = set()
+    if isinstance(obj, dict):
+        id_value = obj.get("@id")
+        if isinstance(id_value, str):
+            found.add(id_value)
+        for v in obj.values():
+            found |= _all_ids(v)
+    elif isinstance(obj, list):
+        for item in obj:
+            found |= _all_ids(item)
+    return found
+
+
+def _fake_convert(_file: Path) -> dict:
+    return {
+        "@context": {},
+        "@type": "RedoxFlowBattery",
+        "schema:productID": "empa__fcid123456",
+        "schema:name": "battinfo-derived-name",
+    }
+
+
+def _all_download_urls(obj: object) -> set[str]:
+    """Recursively collect every "dcat:downloadURL" string value."""
+    found: set[str] = set()
+    if isinstance(obj, dict):
+        url_value = obj.get("dcat:downloadURL")
+        if isinstance(url_value, str):
+            found.add(url_value)
+        for v in obj.values():
+            found |= _all_download_urls(v)
+    elif isinstance(obj, list):
+        for item in obj:
+            found |= _all_download_urls(item)
+    return found
+
+
+def test_analyse_sample_default_package_is_files_and_root_relative(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Default zenodo_package="files": @id stays root-relative, downloadURL is per-file."""
+    from pyflowbatt import analysis as analysis_module
+
+    root = tmp_path / "project"
+    sample = root / "sample_01"
+    sample.mkdir(parents=True)
+    (sample / "metadata.xlsx").write_text("x")
+
+    monkeypatch.setattr(analysis_module, "convert_excel_to_jsonld", _fake_convert)
+
+    config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
+    analysis_module.analyse_sample(
+        sample,
+        save_format=None,
+        config=config,
+        root_folder=root,
+        pub_info={"zenodo_doi_url": "https://doi.org/10.5281/zenodo.20338409"},
+    )
+
+    metadata = json.loads((sample / "metadata.empa__fcid123456.json").read_text())
+    ids = _all_ids(metadata)
+    assert "sample_01/metadata.xlsx" in ids
+
+    urls = _all_download_urls(metadata)
+    expected = "https://zenodo.org/records/20338409/files/sample_01/metadata.xlsx"
+    assert expected in urls
+
+    context = metadata["@context"]
+    local_terms = next(c for c in context if isinstance(c, dict))
+    assert local_terms["@base"] == "https://zenodo.org/records/20338409/"
+
+
+def test_analyse_sample_zip_package_id_points_at_zip_with_path_fragment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """zenodo_package="zip": @id stays root-relative, downloadURL is the zip with a fragment."""
+    from pyflowbatt import analysis as analysis_module
+
+    root = tmp_path / "project"
+    sample = root / "sample_01"
+    sample.mkdir(parents=True)
+    (sample / "metadata.xlsx").write_text("x")
+
+    monkeypatch.setattr(analysis_module, "convert_excel_to_jsonld", _fake_convert)
+
+    config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
+    analysis_module.analyse_sample(
+        sample,
+        save_format=None,
+        config=config,
+        root_folder=root,
+        zenodo_package="zip",
+        pub_info={"zenodo_doi_url": "https://doi.org/10.5281/zenodo.20338409"},
+    )
+
+    metadata = json.loads((sample / "metadata.empa__fcid123456.json").read_text())
+    ids = _all_ids(metadata)
+    assert "sample_01/metadata.xlsx" in ids
+
+    urls = _all_download_urls(metadata)
+    expected = "https://zenodo.org/records/20338409/files/project.zip#sample_01/metadata.xlsx"
+    assert expected in urls
+
+    context = metadata["@context"]
+    local_terms = next(c for c in context if isinstance(c, dict))
+    assert local_terms["@base"] == "https://zenodo.org/records/20338409/"
+
+
+def test_analyse_sample_zip_package_base_shared_across_zips_in_one_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two zips in the same record share "@base": it's scoped to the record, not the zip.
+
+    E.g. publishing the same sample as a small binary-format zip and a larger
+    csv zip under one Zenodo record: files shared between the two bundles
+    (raw inputs, plots, summaries) are the same resource, and should resolve
+    to the same "@id" once expanded - only "dcat:downloadURL" differs per zip.
+    """
+    from pyflowbatt import analysis as analysis_module
+
+    root = tmp_path / "project"
+    sample = root / "sample_01"
+    sample.mkdir(parents=True)
+    (sample / "metadata.xlsx").write_text("x")
+
+    monkeypatch.setattr(analysis_module, "convert_excel_to_jsonld", _fake_convert)
+    config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
+
+    bases = []
+    download_urls = []
+    for zip_filename in ("sample_01_parquet.zip", "sample_01_csv.zip"):
+        analysis_module.analyse_sample(
+            sample,
+            save_format=None,
+            config=config,
+            root_folder=root,
+            zenodo_package="zip",
+            pub_info={
+                "zenodo_doi_url": "https://doi.org/10.5281/zenodo.20338409",
+                "zenodo_zip_filename": zip_filename,
+            },
+        )
+        metadata = json.loads((sample / "metadata.empa__fcid123456.json").read_text())
+        assert "sample_01/metadata.xlsx" in _all_ids(metadata)
+        local_terms = next(c for c in metadata["@context"] if isinstance(c, dict))
+        bases.append(local_terms["@base"])
+        download_urls.append(_all_download_urls(metadata))
+
+    assert bases[0] == bases[1] == "https://zenodo.org/records/20338409/"
+    assert download_urls[0] != download_urls[1]
+
+
+def test_analyse_sample_no_zenodo_url_keeps_bare_relative_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no zenodo_doi_url yet, @id stays a plain root-relative path, no downloadURL."""
+    from pyflowbatt import analysis as analysis_module
+
+    root = tmp_path / "project"
+    sample = root / "sample_01"
+    sample.mkdir(parents=True)
+    (sample / "metadata.xlsx").write_text("x")
+
+    monkeypatch.setattr(analysis_module, "convert_excel_to_jsonld", _fake_convert)
+
+    config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
+    analysis_module.analyse_sample(sample, save_format=None, config=config, root_folder=root)
+
+    metadata = json.loads((sample / "metadata.empa__fcid123456.json").read_text())
+    ids = _all_ids(metadata)
+    assert "sample_01/metadata.xlsx" in ids
+    assert not _all_download_urls(metadata)
+
+
+def test_zip_folder_uses_root_relative_arcnames_no_wrapping_directory(tmp_path: Path) -> None:
+    """zip_folder archives files under root-relative paths, matching BattINFO @id paths."""
+    from pyflowbatt.analysis import zip_folder
+
+    root = tmp_path / "project"
+    (root / "sample_01" / "results").mkdir(parents=True)
+    (root / "sample_01" / "results" / "gcpl.png").write_bytes(b"fake png")
+    (root / "combined_summary.xlsx").write_bytes(b"fake xlsx")
+
+    zip_path = tmp_path / "project.zip"
+    zip_folder(root, zip_path)
+
+    with zipfile.ZipFile(zip_path) as zf:
+        names = set(zf.namelist())
+    assert names == {"sample_01/results/gcpl.png", "combined_summary.xlsx"}
+
+
 def test_sample_id_custom_pattern(tmp_path: Path) -> None:
     """sample_name_pattern in pyflowbatt.toml replaces the default sample-ID regex."""
-    from PyFlowBatt.analysis import get_sampleid_from_folderpath
+    from pyflowbatt.analysis import get_sampleid_from_folderpath
 
     sample_dir = tmp_path / "ABC-123"
     sample_dir.mkdir()
@@ -328,15 +523,15 @@ def _make_raw_battinfo_json(
 
 def test_get_area_cm2_default_no_toml_no_battinfo() -> None:
     """With neither pyflowbatt.toml nor BattINFO, area_cm2 falls back to DEFAULT_AREA_CM2."""
-    from PyFlowBatt.analysis import get_area_cm2
-    from PyFlowBatt.config import DEFAULT_AREA_CM2
+    from pyflowbatt.analysis import get_area_cm2
+    from pyflowbatt.config import DEFAULT_AREA_CM2
 
     assert get_area_cm2(PyFlowBattConfig()) == DEFAULT_AREA_CM2
 
 
 def test_get_area_cm2_from_battinfo_when_electrodes_agree() -> None:
     """When positive and negative electrode areas agree, that value is used."""
-    from PyFlowBatt.analysis import get_area_cm2
+    from pyflowbatt.analysis import get_area_cm2
 
     raw_json = _make_raw_battinfo_json(pos_area=5.0, neg_area=5.0)
     assert get_area_cm2(PyFlowBattConfig(), raw_json) == 5.0
@@ -344,7 +539,7 @@ def test_get_area_cm2_from_battinfo_when_electrodes_agree() -> None:
 
 def test_get_area_cm2_from_battinfo_picks_smaller_when_electrodes_disagree() -> None:
     """When positive and negative electrode areas disagree, the smaller one is used."""
-    from PyFlowBatt.analysis import get_area_cm2
+    from pyflowbatt.analysis import get_area_cm2
 
     raw_json = _make_raw_battinfo_json(pos_area=5.0, neg_area=4.0)
     assert get_area_cm2(PyFlowBattConfig(), raw_json) == 4.0
@@ -352,8 +547,8 @@ def test_get_area_cm2_from_battinfo_picks_smaller_when_electrodes_disagree() -> 
 
 def test_get_area_cm2_ignores_wrong_unit() -> None:
     """A BattINFO Area entry in a unit other than CentiM2 is ignored."""
-    from PyFlowBatt.analysis import get_area_cm2
-    from PyFlowBatt.config import DEFAULT_AREA_CM2
+    from pyflowbatt.analysis import get_area_cm2
+    from pyflowbatt.config import DEFAULT_AREA_CM2
 
     raw_json = _make_raw_battinfo_json(pos_area=5.0, neg_area=5.0, unit="unit:MicroM2")
     assert get_area_cm2(PyFlowBattConfig(), raw_json) == DEFAULT_AREA_CM2
@@ -361,7 +556,7 @@ def test_get_area_cm2_ignores_wrong_unit() -> None:
 
 def test_get_area_cm2_toml_wins_when_battinfo_agrees() -> None:
     """An explicit pyflowbatt.toml area_cm2 that agrees with BattINFO is accepted."""
-    from PyFlowBatt.analysis import get_area_cm2
+    from pyflowbatt.analysis import get_area_cm2
 
     raw_json = _make_raw_battinfo_json(pos_area=3.14, neg_area=3.14)
     config = PyFlowBattConfig(area_cm2=3.14)
@@ -370,7 +565,7 @@ def test_get_area_cm2_toml_wins_when_battinfo_agrees() -> None:
 
 def test_get_area_cm2_toml_battinfo_conflict_raises() -> None:
     """An explicit pyflowbatt.toml area_cm2 that disagrees with BattINFO is an error."""
-    from PyFlowBatt.analysis import get_area_cm2
+    from pyflowbatt.analysis import get_area_cm2
 
     raw_json = _make_raw_battinfo_json(pos_area=5.0, neg_area=5.0)
     config = PyFlowBattConfig(area_cm2=3.14)
@@ -384,7 +579,7 @@ def test_analyse_sample_uses_battinfo_area_for_lsv(
     """analyse_sample resolves area_cm2 from BattINFO electrodes when no toml override exists."""
     import pandas as pd
 
-    from PyFlowBatt import analysis as analysis_module
+    from pyflowbatt import analysis as analysis_module
 
     sample = tmp_path / "sample"
     sample.mkdir()
@@ -397,10 +592,9 @@ def test_analyse_sample_uses_battinfo_area_for_lsv(
 
     captured_areas: list[float] = []
 
-    def fake_analyse(filepath: Path, area_cm2: float = 5) -> tuple[pd.DataFrame, dict]:
+    def fake_analyse(filepath: Path, area_cm2: float = 5) -> dict:
         captured_areas.append(area_cm2)
-        df = pd.DataFrame({"Voltage / V": [0.0, 1.0], "Current / A": [0.0, 1.0]})
-        results = {
+        return {
             "Fit cutoff current / A": 0.0,
             "Intercept / A": 0.0,
             "Slope / Ω⁻¹": 1.0,
@@ -409,13 +603,13 @@ def test_analyse_sample_uses_battinfo_area_for_lsv(
             "Area specific resistance / Ω cm²": area_cm2,
             "File name": Path(filepath).name,
         }
-        return df, results
 
     def fake_plot(df: pd.DataFrame, results: dict) -> tuple:
         import matplotlib.pyplot as plt
 
         return plt.subplots()
 
+    monkeypatch.setattr(analysis_module, "read_to_bdf", lambda file: file)
     monkeypatch.setattr(analysis_module.lsv, "analyse", fake_analyse)
     monkeypatch.setattr(analysis_module.lsv, "plot", fake_plot)
 
@@ -429,7 +623,7 @@ def test_analyse_sample_raises_on_toml_battinfo_area_conflict(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """analyse_sample raises when pyflowbatt.toml area_cm2 disagrees with BattINFO electrodes."""
-    from PyFlowBatt import analysis as analysis_module
+    from pyflowbatt import analysis as analysis_module
 
     sample = tmp_path / "sample"
     sample.mkdir()
@@ -448,14 +642,14 @@ def test_get_assembled_resistance_ohm_default_no_toml_no_battinfo_no_filename() 
     """With no toml, no BattINFO, and no fallback filename, the result is NaN."""
     import math
 
-    from PyFlowBatt.analysis import get_assembled_resistance_ohm
+    from pyflowbatt.analysis import get_assembled_resistance_ohm
 
     assert math.isnan(get_assembled_resistance_ohm(PyFlowBattConfig()))
 
 
 def test_get_assembled_resistance_ohm_from_filename_fallback() -> None:
     """With no toml or BattINFO, the value is parsed out of the fallback filename."""
-    from PyFlowBatt.analysis import get_assembled_resistance_ohm
+    from pyflowbatt.analysis import get_assembled_resistance_ohm
 
     value = get_assembled_resistance_ohm(
         PyFlowBattConfig(), fallback_filename="sample_25kOhm_04_GCPL_CE4"
@@ -478,7 +672,7 @@ def test_get_assembled_resistance_ohm_from_battinfo_unit_variants(
     unit: str, expected: float
 ) -> None:
     """All six unit spellings/prefixes convert to ohms correctly."""
-    from PyFlowBatt.analysis import get_assembled_resistance_ohm
+    from pyflowbatt.analysis import get_assembled_resistance_ohm
 
     raw_json = _make_raw_battinfo_json(resistance_value="25000", resistance_unit=unit)
     assert get_assembled_resistance_ohm(PyFlowBattConfig(), raw_json) == expected
@@ -486,7 +680,7 @@ def test_get_assembled_resistance_ohm_from_battinfo_unit_variants(
 
 def test_get_assembled_resistance_ohm_ignores_unrecognized_unit() -> None:
     """A BattINFO ElectricResistance with an unrecognized unit falls through to the filename."""
-    from PyFlowBatt.analysis import get_assembled_resistance_ohm
+    from pyflowbatt.analysis import get_assembled_resistance_ohm
 
     raw_json = _make_raw_battinfo_json(resistance_value="25000", resistance_unit="unit:VOLT")
     value = get_assembled_resistance_ohm(
@@ -497,7 +691,7 @@ def test_get_assembled_resistance_ohm_ignores_unrecognized_unit() -> None:
 
 def test_get_assembled_resistance_ohm_toml_wins_when_battinfo_agrees() -> None:
     """An explicit pyflowbatt.toml assembled_resistance_ohm that agrees with BattINFO is fine."""
-    from PyFlowBatt.analysis import get_assembled_resistance_ohm
+    from pyflowbatt.analysis import get_assembled_resistance_ohm
 
     raw_json = _make_raw_battinfo_json(resistance_value="25000", resistance_unit="unit:OHM")
     config = PyFlowBattConfig(assembled_resistance_ohm=25000.0)
@@ -506,7 +700,7 @@ def test_get_assembled_resistance_ohm_toml_wins_when_battinfo_agrees() -> None:
 
 def test_get_assembled_resistance_ohm_toml_battinfo_conflict_raises() -> None:
     """An explicit pyflowbatt.toml assembled_resistance_ohm disagreeing with BattINFO errors."""
-    from PyFlowBatt.analysis import get_assembled_resistance_ohm
+    from pyflowbatt.analysis import get_assembled_resistance_ohm
 
     raw_json = _make_raw_battinfo_json(resistance_value="25000", resistance_unit="unit:OHM")
     config = PyFlowBattConfig(assembled_resistance_ohm=9000.0)
@@ -520,7 +714,7 @@ def test_analyse_sample_uses_battinfo_resistance(
     """analyse_sample resolves the summary's Assembled resistance from BattINFO."""
     import pandas as pd
 
-    from PyFlowBatt import analysis as analysis_module
+    from pyflowbatt import analysis as analysis_module
 
     sample = tmp_path / "sample"
     sample.mkdir()
@@ -540,7 +734,7 @@ def test_analyse_sample_raises_on_toml_battinfo_resistance_conflict(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """analyse_sample raises when toml assembled_resistance_ohm disagrees with BattINFO."""
-    from PyFlowBatt import analysis as analysis_module
+    from pyflowbatt import analysis as analysis_module
 
     sample = tmp_path / "sample"
     sample.mkdir()
@@ -564,7 +758,7 @@ def test_area_cm2_passed_to_lsv_analyse(tmp_path: Path, monkeypatch: pytest.Monk
     """
     import pandas as pd
 
-    from PyFlowBatt import analysis as analysis_module
+    from pyflowbatt import analysis as analysis_module
 
     sample = tmp_path / "sample"
     sample.mkdir()
@@ -574,10 +768,9 @@ def test_area_cm2_passed_to_lsv_analyse(tmp_path: Path, monkeypatch: pytest.Monk
 
     captured_areas: list[float] = []
 
-    def fake_analyse(filepath: Path, area_cm2: float = 5) -> tuple[pd.DataFrame, dict]:
+    def fake_analyse(filepath: Path, area_cm2: float = 5) -> dict:
         captured_areas.append(area_cm2)
-        df = pd.DataFrame({"Voltage / V": [0.0, 1.0], "Current / A": [0.0, 1.0]})
-        results = {
+        return {
             "Fit cutoff current / A": 0.0,
             "Intercept / A": 0.0,
             "Slope / Ω⁻¹": 1.0,
@@ -586,13 +779,13 @@ def test_area_cm2_passed_to_lsv_analyse(tmp_path: Path, monkeypatch: pytest.Monk
             "Area specific resistance / Ω cm²": area_cm2,
             "File name": Path(filepath).name,
         }
-        return df, results
 
     def fake_plot(df: pd.DataFrame, results: dict) -> tuple:
         import matplotlib.pyplot as plt
 
         return plt.subplots()
 
+    monkeypatch.setattr(analysis_module, "read_to_bdf", lambda file: file)
     monkeypatch.setattr(analysis_module.lsv, "analyse", fake_analyse)
     monkeypatch.setattr(analysis_module.lsv, "plot", fake_plot)
 
@@ -608,7 +801,7 @@ def _cv_analyse_defaults() -> dict:
     """Read the default kwarg values off cv.analyse's signature."""
     import inspect
 
-    from PyFlowBatt import cv as cv_module
+    from pyflowbatt import cv as cv_module
 
     sig = inspect.signature(cv_module.analyse)
     return {
@@ -620,7 +813,7 @@ def _cv_analyse_defaults() -> dict:
 
 def test_cv_config_defaults_match_cv_module() -> None:
     """Without a pyflowbatt.toml, the [cv] settings match cv.analyse's own defaults."""
-    from PyFlowBatt import cv as cv_module
+    from pyflowbatt import cv as cv_module
 
     config = PyFlowBattConfig()
     defaults = _cv_analyse_defaults()
@@ -664,7 +857,7 @@ def test_analyse_sample_passes_cv_config_to_cv_analyse(
     """analyse_sample threads the [cv] config values through to the real cv.analyse call."""
     import pandas as pd
 
-    from PyFlowBatt import analysis as analysis_module
+    from pyflowbatt import analysis as analysis_module
 
     sample = tmp_path / "sample"
     sample.mkdir()
@@ -687,6 +880,7 @@ def test_analyse_sample_passes_cv_config_to_cv_analyse(
 
         return plt.subplots()
 
+    monkeypatch.setattr(analysis_module, "read_to_bdf", lambda file: file)
     monkeypatch.setattr(analysis_module.cv, "analyse", fake_analyse)
     monkeypatch.setattr(analysis_module.cv, "plot", fake_plot)
 
@@ -731,7 +925,7 @@ def test_analyse_sample_summary_uses_custom_n_cycles(
     """analyse_sample's summary sheet reports exactly the configured summary_n_cycles."""
     import pandas as pd
 
-    from PyFlowBatt import analysis as analysis_module
+    from pyflowbatt import analysis as analysis_module
 
     sample = tmp_path / "sample"
     sample.mkdir()
@@ -761,6 +955,7 @@ def test_analyse_sample_summary_uses_custom_n_cycles(
     def fake_cycles_to_ratetest(_cycle_df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame({"Times seen": [1]})
 
+    monkeypatch.setattr(analysis_module, "read_to_bdf", lambda file: file)
     monkeypatch.setattr(analysis_module.gcpl, "analyse", fake_gcpl_analyse)
     monkeypatch.setattr(analysis_module.gcpl, "plot", fake_gcpl_plot)
     monkeypatch.setattr(analysis_module.gcpl, "cycles_to_ratetest", fake_cycles_to_ratetest)

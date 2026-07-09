@@ -4,6 +4,8 @@ import contextlib
 import json
 import logging
 import re
+import uuid
+import zipfile
 from pathlib import Path
 from typing import Literal
 
@@ -12,9 +14,9 @@ import numpy as np
 import pandas as pd
 from battinfoconverter_backend import convert_excel_to_jsonld
 
-from PyFlowBatt import battinfo, cv, eis, gcpl, lsv, ocv
-from PyFlowBatt.config import DEFAULT_AREA_CM2, EIS_TAGS, PyFlowBattConfig, classify_technique_files
-from PyFlowBatt.read import read_to_bdf
+from pyflowbatt import battinfo, cv, eis, gcpl, lsv, ocv
+from pyflowbatt.config import DEFAULT_AREA_CM2, EIS_TAGS, PyFlowBattConfig, classify_technique_files
+from pyflowbatt.read import read_to_bdf
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +25,7 @@ DEFAULT_DEPTH = 6  # Default max search depth in folders
 DEFAULT_SEARCH = 10000  # Default max number of folders searched
 
 MPR_DESCRIPTIONS: dict[str, str] = {
-    "gcpl": "Galvanostatic cycling measurement (EC-Lab MPR)",
+    "gcpl": "Galvanostatic cycling with potential limitation measurement (EC-Lab MPR)",
     "ocv": "Open circuit voltage measurement (EC-Lab MPR)",
     "lsv_pre": "Pre-cycling linear sweep voltammetry (EC-Lab MPR)",
     "lsv_post": "Post-cycling linear sweep voltammetry (EC-Lab MPR)",
@@ -33,6 +35,93 @@ MPR_DESCRIPTIONS: dict[str, str] = {
     "eis_pre-50%SOC": "EIS measurement, pre-cycling 50% SOC (EC-Lab MPR)",
     "eis_post-50%SOC": "EIS measurement, post-cycling 50% SOC (EC-Lab MPR)",
     "eis_post": "EIS measurement, post-cycling (EC-Lab MPR)",
+}
+
+# Descriptions for the plot (.png) tracked outputs, keyed by the same labels as MPR_DESCRIPTIONS.
+OUTPUT_PLOT_DESCRIPTIONS: dict[str, str] = {
+    "gcpl": (
+        "Plots of voltage vs. time, "
+        "and capacity, energy, coulombic efficiency, and voltage efficiency vs. cycle count "
+        "for galvanostatic cycling with potential limitation (GCPL), "
+        "i.e. constant-current-constant-voltage cycling"
+    ),
+    "lsv_pre": "Plot of current vs. voltage for pre-cycling linear sweep voltammetry",
+    "lsv_post": "Plot of current vs. voltage for post-cycling linear sweep voltammetry",
+    "cv_pre": "Plot of current vs. voltage for pre-cycling cyclic voltammetry",
+    "cv_post": "Plot of current vs. voltage for post-cycling cyclic voltammetry",
+    "eis_pre": (
+        "Nyquist plot for electrochemical impedance spectroscopy (EIS) "
+        r"from before cycling at 0% state of charge"
+    ),
+    "eis_pre-50%SOC": (
+        "Nyquist plot for electrochemical impedance spectroscopy (EIS) "
+        r"from before cycling at 50% state of charge"
+    ),
+    "eis_post-50%SOC": (
+        "Nyquist plot for electrochemical impedance spectroscopy (EIS) "
+        r"from after cycling at 50% state of charge"
+    ),
+    "eis_post": (
+        "Nyquist plot for electrochemical impedance spectroscopy (EIS) "
+        r"from after cycling at 0% state of charge"
+    ),
+}
+
+# Descriptions for the time/frequency series (.parquet/.csv) tracked outputs, keyed by label.
+OUTPUT_DATA_DESCRIPTIONS: dict[str, str] = {
+    "gcpl": (
+        "Time series data from galvanostatic cycling with potential limitation (GCPL), "
+        "i.e. constant-current-constant-voltage cycling, "
+        "using the battery data format (BDF)"
+    ),
+    "lsv_pre": (
+        "Time series data from linear sweep voltammetry before battery cycling, "
+        "using the battery data format (BDF)"
+    ),
+    "lsv_post": (
+        "Time series data from linear sweep voltammetry after battery cycling, "
+        "using the battery data format (BDF)"
+    ),
+    "cv_pre": (
+        "Time series data from cyclic voltammetry before battery cycling, "
+        "using the battery data format (BDF)"
+    ),
+    "cv_post": (
+        "Time series data from cyclic voltammetry after battery cycling, "
+        "using the battery data format (BDF)"
+    ),
+    "eis_pre": (
+        "Frequency-domain electrochemical impedance spectroscopy (EIS) data "
+        r"from before cycling at 0% state-of-charge, "
+        "using the battery data format (BDF)"
+    ),
+    "eis_pre-50%SOC": (
+        "Frequency-domain electrochemical impedance spectroscopy (EIS) data "
+        r"from before cycling at 50% state-of-charge, "
+        "using the battery data format (BDF)"
+    ),
+    "eis_post-50%SOC": (
+        "Frequency-domain electrochemical impedance spectroscopy (EIS) data "
+        r"from after cycling at 50% state-of-charge, "
+        "using the battery data format (BDF)"
+    ),
+    "eis_post": (
+        "Frequency-domain electrochemical impedance spectroscopy (EIS) data "
+        r"from after cycling at 0% state-of-charge, "
+        "using the battery data format (BDF)"
+    ),
+}
+
+# Descriptions for tracked outputs that aren't plots or data series, keyed by label.
+OUTPUT_MISC_DESCRIPTIONS: dict[str, str] = {
+    "summary": "Per-sample analysis summary",
+    "metadata": "BattINFO JSON-LD metadata",
+}
+
+# Descriptions for extra tracked inputs (protocol file, BattINFO xlsx), keyed by label.
+EXTRA_INPUT_DESCRIPTIONS: dict[str, str] = {
+    "protocol": "EC-Lab measurement protocol (.mps)",
+    "battinfo_xlsx": "BattINFO converter Excel metadata input",
 }
 
 
@@ -214,7 +303,7 @@ def get_area_cm2(config: PyFlowBattConfig, raw_battinfo_json: dict | None = None
 
     Resolved in priority order: an explicit ``area_cm2`` set in pyflowbatt.toml, then the
     BattINFO file's positive/negative electrode Substrate Area (if both are present and
-    disagree, the smaller is used), then :data:`PyFlowBatt.config.DEFAULT_AREA_CM2`.
+    disagree, the smaller is used), then :data:`pyflowbatt.config.DEFAULT_AREA_CM2`.
 
     Raises ``ValueError`` if pyflowbatt.toml sets ``area_cm2`` and a BattINFO-derived area
     is also available and the two disagree.
@@ -252,6 +341,46 @@ def get_area_cm2(config: PyFlowBattConfig, raw_battinfo_json: dict | None = None
     return DEFAULT_AREA_CM2
 
 
+def _rel(path: Path, root: Path) -> str:
+    """Return a forward-slash relative path string from root."""
+    return path.relative_to(root).as_posix()
+
+
+def check_path_writable(path: Path) -> None:
+    r"""Raise a clear ``PermissionError`` early if ``path`` can't be created.
+
+    Writing the zip only happens after the full analysis runs, so without this
+    check a permissions problem (e.g. ``path`` sitting directly in a drive root
+    like ``C:\``) only surfaces at the very end, wasting all that work.
+    """
+    probe = path.parent / f".pyflowbatt_write_test_{uuid.uuid4().hex}"
+    try:
+        probe.touch()
+    except OSError as e:
+        msg = (
+            f"Cannot write '{path.name}' to {path.parent}: {e}. "
+            r"Pick an output folder you have write access to (like documents, avoid C:\.), "
+            r"or run as administrator."
+        )
+        raise PermissionError(msg) from e
+    else:
+        probe.unlink()
+
+
+def zip_folder(root_folder: Path, zip_path: Path) -> Path:
+    """Zip every file in root_folder into zip_path, with no wrapping top-level directory.
+
+    Archive members are root_folder-relative paths, matching the "@id"s used for
+    files in both the RO-Crate manifest and BattINFO metadata, so a file's "@id"
+    can be found directly inside the zip once it's extracted.
+    """
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for file in sorted(root_folder.rglob("*")):
+            if file.is_file():
+                zf.write(file, arcname=_rel(file, root_folder))
+    return zip_path
+
+
 def df_save_bdf(df: pd.DataFrame, filepath: Path, save_format: SAVE_FORMATS = "parquet") -> None:
     """Save df to file."""
     if save_format is None:
@@ -272,14 +401,32 @@ def analyse_sample(
     pub_info: dict | None = None,
     save_format: SAVE_FORMATS = "parquet",
     config: PyFlowBattConfig | None = None,
+    root_folder: str | Path | None = None,
+    zenodo_package: Literal["zip", "files"] = "files",
 ) -> tuple[dict[str, list[Path]], dict[str, list[Path]], str | None, str]:
     """Read all the files in a folder, analayse and plot everything.
 
     Without an explicit config, loads a ``pyflowbatt.toml`` cascade (home directory,
     parent folder, sample folder) to customise technique glob patterns and sample ID
     detection.
+
+    ``root_folder`` is the top-level folder that will be uploaded to Zenodo (defaults
+    to ``folder`` itself). BattINFO metadata file paths are recorded relative to it, so
+    that when there are multiple sample folders under one root, "@id"s stay unambiguous
+    and match where the file actually sits once the root folder is packaged for Zenodo.
+    Every file's "@id" is this bare root-relative path, matching its "@id" in the
+    RO-Crate manifest (ro-crate-metadata.json); this deliberately never changes with
+    ``zenodo_package`` or Zenodo upload, so the two documents can be cross-referenced by
+    "@id" alone.
+
+    ``zenodo_package`` controls how the resolved "dcat:downloadURL" (a separate property
+    from "@id") points at Zenodo-hosted files, once ``pub_info["zenodo_doi_url"]`` is
+    known: "files" (default) points directly at each file's own Zenodo download URL
+    (matching an unzipped upload); "zip" points at one zip's Zenodo download URL with the
+    in-archive path as a fragment (see :func:`pyflowbatt.battinfo.zenodo_download_url`).
     """
     folder = Path(folder)
+    root_folder = Path(root_folder) if root_folder is not None else folder
     pub_info = pub_info or {}
     fcid: str | None = None
     config = config or PyFlowBattConfig.load(folder)
@@ -341,32 +488,37 @@ def analyse_sample(
             battinfo_sample_id = raw_json["schema:name"]
             raw_battinfo_json = raw_json
             battinfo_json = battinfo.make_test_object(raw_json)
-            battinfo_json = battinfo.merge_jsonld_on_type(
-                [battinfo_json, battinfo.add_input_and_output()],
-            )
-            if pub_info and pub_info.get("citation_string"):
-                battinfo_json = battinfo.merge_jsonld_on_type(
-                    [battinfo_json, battinfo.add_citation(pub_info["citation_string"])]
-                )
-            if pub_info and pub_info.get("authors") and pub_info.get("institutions"):
-                battinfo_json = battinfo.merge_jsonld_on_type(
-                    [
-                        battinfo_json,
+
+            # Create list of everything that can be included in JSON-LD
+            merge_list = [battinfo_json, battinfo.add_input_and_output()]
+            if pub_info:
+                if pub_info.get("zenodo_doi_url"):
+                    merge_list.append(battinfo.add_zenodo_url(pub_info["zenodo_doi_url"]))
+                if pub_info.get("citation_string"):
+                    merge_list.append(battinfo.add_citation(pub_info["citation_string"]))
+                if pub_info.get("institution"):
+                    merge_list.append(
+                        battinfo.add_institution(
+                            pub_info["institution"],
+                            pub_info.get("institutions", {}).get(pub_info["institution"]),
+                        )
+                    )
+                if pub_info.get("authors") and pub_info.get("institutions"):
+                    merge_list.append(
                         battinfo.add_authors(pub_info["authors"], pub_info["institutions"]),
-                    ]
-                )
-            if pub_info and pub_info.get("sample_to_fig"):
-                battinfo_json = battinfo.merge_jsonld_on_type(
-                    [
-                        battinfo_json,
+                    )
+                if pub_info.get("sample_to_fig"):
+                    merge_list.append(
                         battinfo.add_associated_media(
                             pub_info.get("publication_doi_url"),
                             pub_info["sample_to_fig"],
                             fcid,
                             battinfo_sample_id,
                         ),
-                    ]
-                )
+                    )
+
+            # Merge everything
+            battinfo_json = battinfo.merge_jsonld_on_type(merge_list)
             break
         else:
             logger.info("- ☹️ Couldn't convert battinfo xlsx")
@@ -383,7 +535,8 @@ def analyse_sample(
         logger.info("- ☹️ No OCV found, skipping")
     else:
         try:
-            av_ocv = ocv.analyse(ocv_files[0])
+            df = read_to_bdf(ocv_files[0])
+            av_ocv = ocv.analyse(df)
             tracked_mpr_inputs["ocv"] = [ocv_files[0]]
         except ValueError:
             logger.exception("Failed to analyse OCV")
@@ -392,7 +545,7 @@ def analyse_sample(
     if gcpl_file is None:
         logger.warning("- ☹️ No GCPL files found, skipping")
     else:
-        df, cycle_df = gcpl.analyse([gcpl_file])
+        df, cycle_df = gcpl.analyse(read_to_bdf(gcpl_file))
         fig, _ax = gcpl.plot(df, cycle_df)
         fig.savefig(results_dir / "gcpl.png")
         plt.close(fig)
@@ -418,7 +571,9 @@ def analyse_sample(
             if not lsv_files_p:
                 continue
             try:
-                df, results = lsv.analyse(lsv_files_p[0], area_cm2=area_cm2)
+                df = read_to_bdf(lsv_files_p[0])
+                results = lsv.analyse(df, area_cm2=area_cm2)
+                results["File name"] = lsv_files_p[0].name
                 fig, _ax = lsv.plot(df, results)
                 fig.savefig(results_dir / f"lsv_{p}.png")
                 plt.close(fig)
@@ -445,7 +600,7 @@ def analyse_sample(
             if not cv_files:
                 continue
             df, cv_df, capacitance_mF = cv.analyse(
-                cv_files[0],
+                read_to_bdf(cv_files[0]),
                 v_min=config.cv_v_min,
                 v_max=config.cv_v_max,
                 v_med=config.cv_v_med,
@@ -648,37 +803,57 @@ def analyse_sample(
 
     if battinfo_json is not None:
         zenodo_url = pub_info.get("zenodo_doi_url") if pub_info else None
+        zenodo_zip_filename = pub_info.get("zenodo_zip_filename") or f"{root_folder.name}.zip"
         for label, paths in tracked_mpr_inputs.items():
             for path in paths:
                 snippet = battinfo.add_data(
-                    path.relative_to(folder).as_posix(),
+                    _rel(path, root_folder),
                     zenodo_url,
                     extras={"rdfs:comment": MPR_DESCRIPTIONS.get(label)},
+                    package=zenodo_package,
+                    zip_filename=zenodo_zip_filename,
                 )
                 battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
         for path in mps_files:
             snippet = battinfo.add_input_data(
-                path.relative_to(folder).as_posix(),
+                _rel(path, root_folder),
                 zenodo_url,
-                "EC-Lab measurement protocol (.mps)",
+                EXTRA_INPUT_DESCRIPTIONS["protocol"],
+                package=zenodo_package,
+                zip_filename=zenodo_zip_filename,
             )
             battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
         if battinfo_xlsx_path:
             snippet = battinfo.add_input_data(
-                battinfo_xlsx_path.relative_to(folder).as_posix(),
+                _rel(battinfo_xlsx_path, root_folder),
                 zenodo_url,
-                "BattINFO converter Excel metadata input",
+                EXTRA_INPUT_DESCRIPTIONS["battinfo_xlsx"],
+                package=zenodo_package,
+                zip_filename=zenodo_zip_filename,
             )
             battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
-        for label_paths in tracked_outputs.values():
+        for label, label_paths in tracked_outputs.items():
             for path in label_paths:
-                rel = path.relative_to(folder).as_posix()
+                rel = _rel(path, root_folder)
+                if path.suffix == ".png":
+                    comment = OUTPUT_PLOT_DESCRIPTIONS.get(label)
+                elif rel.endswith((".parquet", ".csv")):
+                    comment = OUTPUT_DATA_DESCRIPTIONS.get(label)
+                else:
+                    comment = OUTPUT_MISC_DESCRIPTIONS.get(label)
+                extras = {"rdfs:comment": comment} if comment else None
                 with contextlib.suppress(ValueError):
-                    snippet = battinfo.add_data(rel, zenodo_url)
+                    snippet = battinfo.add_data(
+                        rel,
+                        zenodo_url,
+                        extras=extras,
+                        package=zenodo_package,
+                        zip_filename=zenodo_zip_filename,
+                    )
                     battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
         metadata_path = folder / f"metadata.{fcid or sample_id}.json"
-        with metadata_path.open("w") as mf:
-            json.dump(battinfo_json, mf, indent=4)
+        with metadata_path.open("w", encoding="utf-8") as mf:
+            json.dump(battinfo_json, mf, indent=4, ensure_ascii=False)
         tracked_outputs["metadata"] = [metadata_path]
 
     return tracked_outputs, tracked_extra_inputs, fcid, sample_id
@@ -803,10 +978,22 @@ def analyse_all_samples(
     save_format: SAVE_FORMATS = "parquet",
     max_search_depth: int = DEFAULT_DEPTH,
     max_folder_searches: int = DEFAULT_SEARCH,
+    zip_output: bool = False,
 ) -> None:
-    """Take a folder and run all analysis."""
+    """Take a folder and run all analysis.
+
+    If ``zip_output`` is True, everything is zipped into a single zip file next to
+    ``folder`` once analysis finishes, and BattINFO "@id"s reference that zip's Zenodo
+    download URL with the in-archive path as a fragment. Otherwise (the default),
+    files are left unzipped and "@id"s reference each file's own Zenodo download URL
+    directly, for uploading every file individually.
+    """
     folder = Path(folder).resolve()
     pub_info = pub_info_from_root(folder)
+    zenodo_package: Literal["zip", "files"] = "zip" if zip_output else "files"
+    zip_filename = pub_info.get("zenodo_zip_filename") or f"{folder.name}.zip"
+    if zip_output:
+        check_path_writable(folder.parent / zip_filename)
     search_config = PyFlowBattConfig.load(folder)
     sample_folders = find_all_sample_folders(
         folder, max_search_depth, max_folder_searches, search_config
@@ -834,6 +1021,8 @@ def analyse_all_samples(
             save_format=save_format,
             pub_info=pub_info,
             config=configs_by_sample_folder[sample_folder],
+            root_folder=folder,
+            zenodo_package=zenodo_package,
         )
 
     if len(sample_folders) > 1:
@@ -849,7 +1038,7 @@ def analyse_all_samples(
         workbook.close()
         logger.info("\n🎉 Combined all the results into one big summary")
 
-    from PyFlowBatt.rocrate_output import write_rocrate  # noqa: PLC0415
+    from pyflowbatt.rocrate_output import write_rocrate  # noqa: PLC0415
 
     write_rocrate(
         folder,
@@ -862,11 +1051,19 @@ def analyse_all_samples(
     )
     logger.info("📦 Written RO-Crate metadata to %s", folder / "ro-crate-metadata.json")
 
+    if zip_output:
+        zip_path = folder.parent / zip_filename
+        zip_folder(folder, zip_path)
+        logger.info("🤐 Zipped everything into %s", zip_path)
+
 
 def dry_analyse_all_samples(
     folder: str | Path,
     max_search_depth: int = DEFAULT_DEPTH,
     max_folder_searches: int = DEFAULT_SEARCH,
+    *,
+    save_format: SAVE_FORMATS = "parquet",
+    zip_output: bool = False,
 ) -> None:
     """Take a folder and tell the user what PyFlowBatt would do."""
     logger.info("Beginning dry-run search.")
@@ -880,14 +1077,40 @@ def dry_analyse_all_samples(
         logger.info("Found 1 sample inside")
     else:
         logger.info("Found %d samples inside.", len(sample_folders))
-    logger.info("I would analyse the following samples and make a 'results' subfolder inside:")
     for sample_folder in sample_folders:
-        logger.info("  - %s", sample_folder)
+        logger.info("  - %s", sample_folder.relative_to(folder))
+        sample_config = PyFlowBattConfig.load(sample_folder)
+        classified = classify_technique_files(sample_folder, sample_config)
+        tagged_files: list[tuple[str, Path]] = [
+            (tag, f) for tag, files in classified.items() for f in files
+        ]
+        tagged_files += [("protocol", f) for f in sample_folder.glob("*.mps")]
+        tagged_files += [("battinfo_xlsx", f) for f in sample_folder.glob("*.xlsx")]
+        tagged_files.sort(key=lambda item: item[1].name)
+        if tagged_files:
+            tag_width = max(len(tag) for tag, _ in tagged_files)
+            for tag, file in tagged_files:
+                logger.info("      - %-*s %s", tag_width + 1, f"{tag}:", file.name)
+        else:
+            logger.info("      (no recognised technique files found)")
+    logger.info(
+        "In each sample folder, I would analyse this data and make a 'results' subfolder inside."
+    )
+    logger.info("Results would be saved as battery data format in '%s' files.", save_format)
     if len(sample_folders) > 1:
         logger.info(
-            "Then I would combine all the summaries into one 'combined_results' subfolder inside %s.",
-            folder,
+            "Then I would combine all the summaries into one 'combined_results.xlsx' "
+            "at the root '%s'.",
+            folder.name,
         )
+    if zip_output:
+        pub_info = pub_info_from_root(folder)
+        zip_filename = pub_info.get("zenodo_zip_filename") or f"{folder.name}.zip"
+        logger.info("Then I would zip everything and output to %s.", folder.parent / zip_filename)
+        logger.info("BattINFO metadata would reference files via that zip's download URL.")
+    else:
+        logger.info("Files would be left unzipped (pass --zip to bundle them into one zip).")
+        logger.info("BattINFO metadata would reference each file's own download URL.")
 
 
 def pub_info_from_root(folder: Path) -> dict:
