@@ -1658,7 +1658,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "batterydf", specifier = ">=0.1.0" },
+    { name = "batterydf", specifier = ">=0.1.0,<0.2.0" },
     { name = "battinfoconverter-backend", specifier = ">=3.2.0" },
     { name = "bumpver", marker = "extra == 'dev'", specifier = ">=2025.1131" },
     { name = "impedance", specifier = ">=1.7.1" },
