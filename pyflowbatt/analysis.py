@@ -535,7 +535,8 @@ def analyse_sample(
         logger.info("- ☹️ No OCV found, skipping")
     else:
         try:
-            av_ocv = ocv.analyse(ocv_files[0])
+            df = read_to_bdf(ocv_files[0])
+            av_ocv = ocv.analyse(df)
             tracked_mpr_inputs["ocv"] = [ocv_files[0]]
         except ValueError:
             logger.exception("Failed to analyse OCV")
@@ -544,7 +545,7 @@ def analyse_sample(
     if gcpl_file is None:
         logger.warning("- ☹️ No GCPL files found, skipping")
     else:
-        df, cycle_df = gcpl.analyse([gcpl_file])
+        df, cycle_df = gcpl.analyse(read_to_bdf(gcpl_file))
         fig, _ax = gcpl.plot(df, cycle_df)
         fig.savefig(results_dir / "gcpl.png")
         plt.close(fig)
@@ -570,7 +571,9 @@ def analyse_sample(
             if not lsv_files_p:
                 continue
             try:
-                df, results = lsv.analyse(lsv_files_p[0], area_cm2=area_cm2)
+                df = read_to_bdf(lsv_files_p[0])
+                results = lsv.analyse(df, area_cm2=area_cm2)
+                results["File name"] = lsv_files_p[0].name
                 fig, _ax = lsv.plot(df, results)
                 fig.savefig(results_dir / f"lsv_{p}.png")
                 plt.close(fig)
@@ -597,7 +600,7 @@ def analyse_sample(
             if not cv_files:
                 continue
             df, cv_df, capacitance_mF = cv.analyse(
-                cv_files[0],
+                read_to_bdf(cv_files[0]),
                 v_min=config.cv_v_min,
                 v_max=config.cv_v_max,
                 v_med=config.cv_v_med,

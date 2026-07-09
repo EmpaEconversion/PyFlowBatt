@@ -592,10 +592,9 @@ def test_analyse_sample_uses_battinfo_area_for_lsv(
 
     captured_areas: list[float] = []
 
-    def fake_analyse(filepath: Path, area_cm2: float = 5) -> tuple[pd.DataFrame, dict]:
+    def fake_analyse(filepath: Path, area_cm2: float = 5) -> dict:
         captured_areas.append(area_cm2)
-        df = pd.DataFrame({"Voltage / V": [0.0, 1.0], "Current / A": [0.0, 1.0]})
-        results = {
+        return {
             "Fit cutoff current / A": 0.0,
             "Intercept / A": 0.0,
             "Slope / Ω⁻¹": 1.0,
@@ -604,13 +603,13 @@ def test_analyse_sample_uses_battinfo_area_for_lsv(
             "Area specific resistance / Ω cm²": area_cm2,
             "File name": Path(filepath).name,
         }
-        return df, results
 
     def fake_plot(df: pd.DataFrame, results: dict) -> tuple:
         import matplotlib.pyplot as plt
 
         return plt.subplots()
 
+    monkeypatch.setattr(analysis_module, "read_to_bdf", lambda file: file)
     monkeypatch.setattr(analysis_module.lsv, "analyse", fake_analyse)
     monkeypatch.setattr(analysis_module.lsv, "plot", fake_plot)
 
@@ -769,10 +768,9 @@ def test_area_cm2_passed_to_lsv_analyse(tmp_path: Path, monkeypatch: pytest.Monk
 
     captured_areas: list[float] = []
 
-    def fake_analyse(filepath: Path, area_cm2: float = 5) -> tuple[pd.DataFrame, dict]:
+    def fake_analyse(filepath: Path, area_cm2: float = 5) -> dict:
         captured_areas.append(area_cm2)
-        df = pd.DataFrame({"Voltage / V": [0.0, 1.0], "Current / A": [0.0, 1.0]})
-        results = {
+        return {
             "Fit cutoff current / A": 0.0,
             "Intercept / A": 0.0,
             "Slope / Ω⁻¹": 1.0,
@@ -781,13 +779,13 @@ def test_area_cm2_passed_to_lsv_analyse(tmp_path: Path, monkeypatch: pytest.Monk
             "Area specific resistance / Ω cm²": area_cm2,
             "File name": Path(filepath).name,
         }
-        return df, results
 
     def fake_plot(df: pd.DataFrame, results: dict) -> tuple:
         import matplotlib.pyplot as plt
 
         return plt.subplots()
 
+    monkeypatch.setattr(analysis_module, "read_to_bdf", lambda file: file)
     monkeypatch.setattr(analysis_module.lsv, "analyse", fake_analyse)
     monkeypatch.setattr(analysis_module.lsv, "plot", fake_plot)
 
@@ -882,6 +880,7 @@ def test_analyse_sample_passes_cv_config_to_cv_analyse(
 
         return plt.subplots()
 
+    monkeypatch.setattr(analysis_module, "read_to_bdf", lambda file: file)
     monkeypatch.setattr(analysis_module.cv, "analyse", fake_analyse)
     monkeypatch.setattr(analysis_module.cv, "plot", fake_plot)
 
@@ -956,6 +955,7 @@ def test_analyse_sample_summary_uses_custom_n_cycles(
     def fake_cycles_to_ratetest(_cycle_df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame({"Times seen": [1]})
 
+    monkeypatch.setattr(analysis_module, "read_to_bdf", lambda file: file)
     monkeypatch.setattr(analysis_module.gcpl, "analyse", fake_gcpl_analyse)
     monkeypatch.setattr(analysis_module.gcpl, "plot", fake_gcpl_plot)
     monkeypatch.setattr(analysis_module.gcpl, "cycles_to_ratetest", fake_cycles_to_ratetest)
