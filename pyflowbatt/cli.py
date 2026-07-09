@@ -48,6 +48,7 @@ def analyse(
             folderpath,
             max_folder_searches=max_folder_searches,
             max_search_depth=max_search_depth,
+            zip_output=zip_output,
         )
     else:
         analyse_all_samples(

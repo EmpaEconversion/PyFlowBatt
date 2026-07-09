@@ -1058,6 +1058,9 @@ def dry_analyse_all_samples(
     folder: str | Path,
     max_search_depth: int = DEFAULT_DEPTH,
     max_folder_searches: int = DEFAULT_SEARCH,
+    *,
+    save_format: SAVE_FORMATS = "parquet",
+    zip_output: bool = False,
 ) -> None:
     """Take a folder and tell the user what PyFlowBatt would do."""
     logger.info("Beginning dry-run search.")
@@ -1071,14 +1074,40 @@ def dry_analyse_all_samples(
         logger.info("Found 1 sample inside")
     else:
         logger.info("Found %d samples inside.", len(sample_folders))
-    logger.info("I would analyse the following samples and make a 'results' subfolder inside:")
     for sample_folder in sample_folders:
-        logger.info("  - %s", sample_folder)
+        logger.info("  - %s", sample_folder.relative_to(folder))
+        sample_config = PyFlowBattConfig.load(sample_folder)
+        classified = classify_technique_files(sample_folder, sample_config)
+        tagged_files: list[tuple[str, Path]] = [
+            (tag, f) for tag, files in classified.items() for f in files
+        ]
+        tagged_files += [("protocol", f) for f in sample_folder.glob("*.mps")]
+        tagged_files += [("battinfo_xlsx", f) for f in sample_folder.glob("*.xlsx")]
+        tagged_files.sort(key=lambda item: item[1].name)
+        if tagged_files:
+            tag_width = max(len(tag) for tag, _ in tagged_files)
+            for tag, file in tagged_files:
+                logger.info("      - %-*s %s", tag_width + 1, f"{tag}:", file.name)
+        else:
+            logger.info("      (no recognised technique files found)")
+    logger.info(
+        "In each sample folder, I would analyse this data and make a 'results' subfolder inside."
+    )
+    logger.info("Results would be saved as battery data format in '%s' files.", save_format)
     if len(sample_folders) > 1:
         logger.info(
-            "Then I would combine all the summaries into one 'combined_results' subfolder inside %s.",
-            folder,
+            "Then I would combine all the summaries into one 'combined_results.xlsx' "
+            "at the root '%s'.",
+            folder.name,
         )
+    if zip_output:
+        pub_info = pub_info_from_root(folder)
+        zip_filename = pub_info.get("zenodo_zip_filename") or f"{folder.name}.zip"
+        logger.info("Then I would zip everything and output to %s.", folder.parent / zip_filename)
+        logger.info("BattINFO metadata would reference files via that zip's download URL.")
+    else:
+        logger.info("Files would be left unzipped (pass --zip to bundle them into one zip).")
+        logger.info("BattINFO metadata would reference each file's own download URL.")
 
 
 def pub_info_from_root(folder: Path) -> dict:
