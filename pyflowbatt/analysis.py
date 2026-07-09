@@ -24,7 +24,7 @@ DEFAULT_DEPTH = 6  # Default max search depth in folders
 DEFAULT_SEARCH = 10000  # Default max number of folders searched
 
 MPR_DESCRIPTIONS: dict[str, str] = {
-    "gcpl": "Galvanostatic cycling measurement (EC-Lab MPR)",
+    "gcpl": "Galvanostatic cycling with potential limitation measurement (EC-Lab MPR)",
     "ocv": "Open circuit voltage measurement (EC-Lab MPR)",
     "lsv_pre": "Pre-cycling linear sweep voltammetry (EC-Lab MPR)",
     "lsv_post": "Post-cycling linear sweep voltammetry (EC-Lab MPR)",
@@ -34,6 +34,93 @@ MPR_DESCRIPTIONS: dict[str, str] = {
     "eis_pre-50%SOC": "EIS measurement, pre-cycling 50% SOC (EC-Lab MPR)",
     "eis_post-50%SOC": "EIS measurement, post-cycling 50% SOC (EC-Lab MPR)",
     "eis_post": "EIS measurement, post-cycling (EC-Lab MPR)",
+}
+
+# Descriptions for the plot (.png) tracked outputs, keyed by the same labels as MPR_DESCRIPTIONS.
+OUTPUT_PLOT_DESCRIPTIONS: dict[str, str] = {
+    "gcpl": (
+        "Plots of voltage vs. time, "
+        "and capacity, energy, coulombic efficiency, and voltage efficiency vs. cycle count "
+        "for galvanostatic cycling with potential limitation (GCPL), "
+        "i.e. constant-current-constant-voltage cycling"
+    ),
+    "lsv_pre": "Plot of current vs. voltage for pre-cycling linear sweep voltammetry",
+    "lsv_post": "Plot of current vs. voltage for post-cycling linear sweep voltammetry",
+    "cv_pre": "Plot of current vs. voltage for pre-cycling cyclic voltammetry",
+    "cv_post": "Plot of current vs. voltage for post-cycling cyclic voltammetry",
+    "eis_pre": (
+        "Nyquist plot for electrochemical impedance spectroscopy (EIS) "
+        r"from before cycling at 0% state of charge"
+    ),
+    "eis_pre-50%SOC": (
+        "Nyquist plot for electrochemical impedance spectroscopy (EIS) "
+        r"from before cycling at 50% state of charge"
+    ),
+    "eis_post-50%SOC": (
+        "Nyquist plot for electrochemical impedance spectroscopy (EIS) "
+        r"from after cycling at 50% state of charge"
+    ),
+    "eis_post": (
+        "Nyquist plot for electrochemical impedance spectroscopy (EIS) "
+        r"from after cycling at 0% state of charge"
+    ),
+}
+
+# Descriptions for the time/frequency series (.parquet/.csv) tracked outputs, keyed by label.
+OUTPUT_DATA_DESCRIPTIONS: dict[str, str] = {
+    "gcpl": (
+        "Time series data from galvanostatic cycling with potential limitation (GCPL), "
+        "i.e. constant-current-constant-voltage cycling, "
+        "using the battery data format (BDF)"
+    ),
+    "lsv_pre": (
+        "Time series data from linear sweep voltammetry before battery cycling, "
+        "using the battery data format (BDF)"
+    ),
+    "lsv_post": (
+        "Time series data from linear sweep voltammetry after battery cycling, "
+        "using the battery data format (BDF)"
+    ),
+    "cv_pre": (
+        "Time series data from cyclic voltammetry before battery cycling, "
+        "using the battery data format (BDF)"
+    ),
+    "cv_post": (
+        "Time series data from cyclic voltammetry after battery cycling, "
+        "using the battery data format (BDF)"
+    ),
+    "eis_pre": (
+        "Frequency-domain electrochemical impedance spectroscopy (EIS) data "
+        r"from before cycling at 0% state-of-charge, "
+        "using the battery data format (BDF)"
+    ),
+    "eis_pre-50%SOC": (
+        "Frequency-domain electrochemical impedance spectroscopy (EIS) data "
+        r"from before cycling at 50% state-of-charge, "
+        "using the battery data format (BDF)"
+    ),
+    "eis_post-50%SOC": (
+        "Frequency-domain electrochemical impedance spectroscopy (EIS) data "
+        r"from after cycling at 50% state-of-charge, "
+        "using the battery data format (BDF)"
+    ),
+    "eis_post": (
+        "Frequency-domain electrochemical impedance spectroscopy (EIS) data "
+        r"from after cycling at 0% state-of-charge, "
+        "using the battery data format (BDF)"
+    ),
+}
+
+# Descriptions for tracked outputs that aren't plots or data series, keyed by label.
+OUTPUT_MISC_DESCRIPTIONS: dict[str, str] = {
+    "summary": "Per-sample analysis summary",
+    "metadata": "BattINFO JSON-LD metadata",
+}
+
+# Descriptions for extra tracked inputs (protocol file, BattINFO xlsx), keyed by label.
+EXTRA_INPUT_DESCRIPTIONS: dict[str, str] = {
+    "protocol": "EC-Lab measurement protocol (.mps)",
+    "battinfo_xlsx": "BattINFO converter Excel metadata input",
 }
 
 
@@ -701,7 +788,7 @@ def analyse_sample(
             snippet = battinfo.add_input_data(
                 _rel(path, root_folder),
                 zenodo_url,
-                "EC-Lab measurement protocol (.mps)",
+                EXTRA_INPUT_DESCRIPTIONS["protocol"],
                 package=zenodo_package,
                 zip_filename=zenodo_zip_filename,
             )
@@ -710,17 +797,28 @@ def analyse_sample(
             snippet = battinfo.add_input_data(
                 _rel(battinfo_xlsx_path, root_folder),
                 zenodo_url,
-                "BattINFO converter Excel metadata input",
+                EXTRA_INPUT_DESCRIPTIONS["battinfo_xlsx"],
                 package=zenodo_package,
                 zip_filename=zenodo_zip_filename,
             )
             battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
-        for label_paths in tracked_outputs.values():
+        for label, label_paths in tracked_outputs.items():
             for path in label_paths:
                 rel = _rel(path, root_folder)
+                if path.suffix == ".png":
+                    comment = OUTPUT_PLOT_DESCRIPTIONS.get(label)
+                elif rel.endswith((".parquet", ".csv")):
+                    comment = OUTPUT_DATA_DESCRIPTIONS.get(label)
+                else:
+                    comment = OUTPUT_MISC_DESCRIPTIONS.get(label)
+                extras = {"rdfs:comment": comment} if comment else None
                 with contextlib.suppress(ValueError):
                     snippet = battinfo.add_data(
-                        rel, zenodo_url, package=zenodo_package, zip_filename=zenodo_zip_filename
+                        rel,
+                        zenodo_url,
+                        extras=extras,
+                        package=zenodo_package,
+                        zip_filename=zenodo_zip_filename,
                     )
                     battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
         metadata_path = folder / f"metadata.{fcid or sample_id}.json"
