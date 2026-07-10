@@ -1,6 +1,6 @@
 """Version information for PyFlowBatt."""
 
-__version__ = "0.2.0rc0"
+__version__ = "0.2.0rc1"
 __title__ = "PyFlowBatt"
 __copyright__ = "2025, Empa"
 __description__ = """
