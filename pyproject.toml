@@ -1,17 +1,24 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
-name = "flussli"
+name = "pyflowbatt"
 dynamic = ["version"]
 description = "Tools for analysing data from the flow battery lab at Empa"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "batterydf>=0.1.0,<0.2.0",
+    "battinfoconverter-backend>=3.2.0",
     "impedance>=1.7.1",
     "matplotlib>=3.10.6",
     "pandas>=2.3.2",
     "pyarrow>=21.0.0",
-    "tqdm>=4.67.1",
     "xlsxwriter>=3.2.9",
+    "rocrate>=0.9",
     "yadg>=6.2.2,<7.0.0",
+    "tomli>=2.0.0; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]
@@ -23,7 +30,11 @@ dev = [
 ]
 
 [project.scripts]
-flussli = "flussli.cli:main"
+pyflowbatt = "pyflowbatt.cli:main"
+flussli = "pyflowbatt.cli:main"
+
+[tool.hatch.version]
+path = "pyflowbatt/version.py"
 
 [tool.ruff]
 line-length = 100  # Set the maximum line length
@@ -55,7 +66,7 @@ exclude = [
 ]
 
 [tool.bumpver]
-current_version = "v0.1.0"
+current_version = "v0.2.0rc1"
 version_pattern = "vMAJOR.MINOR.PATCH[PYTAGNUM]"
 commit_message = "Bump version {old_version} -> {new_version}."
 tag_message = "Release {new_version}."
@@ -67,6 +78,6 @@ tag = true
 push = true
 
 [tool.bumpver.file_patterns]
-"flussli/version.py" = [
+"pyflowbatt/version.py" = [
     '__version__ = "{pep440_version}"',
 ]

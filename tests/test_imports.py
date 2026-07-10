@@ -3,15 +3,15 @@
 import importlib
 import pkgutil
 
-import flussli
+import pyflowbatt
 
 
 class TestImportAllModules:
     """Import all modules."""
 
     def test_import_all_modules(self) -> None:
-        """Dynamically import all modules in the flussli package."""
-        package = flussli
+        """Dynamically import all modules in the pyflowbatt package."""
+        package = pyflowbatt
         for _importer, modname, _ispkg in pkgutil.walk_packages(
             package.__path__,
             package.__name__ + ".",
