@@ -373,10 +373,16 @@ def zip_folder(root_folder: Path, zip_path: Path) -> Path:
     Archive members are root_folder-relative paths, matching the "@id"s used for
     files in both the RO-Crate manifest and BattINFO metadata, so a file's "@id"
     can be found directly inside the zip once it's extracted.
+
+    Ignores hidden EC-lab files and Excel lock files.
     """
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for file in sorted(root_folder.rglob("*")):
-            if file.is_file():
+            if (
+                file.is_file()
+                and file.suffix not in {".mgr", ".sta", ".mpp", ".mgp"}
+                and not file.name.startswith("~$")
+            ):
                 zf.write(file, arcname=_rel(file, root_folder))
     return zip_path
 
