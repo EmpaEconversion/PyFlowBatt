@@ -285,9 +285,10 @@ def _extract_electrode_area_cm2(raw_battinfo_json: dict, electrode_key: str) -> 
         if not isinstance(prop, dict) or prop.get("@type") != "Area":
             continue
         unit = prop.get("hasMeasurementUnit")
-        if unit != "unit:CentiM2":
+        if unit not in {"unit:CentiM2", "SquareCentiMetre", "emmo:SquareCentiMetre"}:
             logger.warning(
-                "Ignoring %s Area with unit %s in BattINFO file (expected unit:CentiM2)",
+                "Ignoring %s Area with unit %s in BattINFO file "
+                "(expected unit:CentiM2 or SquareCentiMetre)",
                 electrode_key,
                 unit,
             )
