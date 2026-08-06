@@ -519,12 +519,12 @@ def zenodo_download_url(
     record_id = zenodo_record_id(zenodo_doi_url)
     base = f"https://zenodo.org/records/{record_id}/files"
     if package == "files":
-        return f"{base}/{quote(root_rel_path, safe='/')}"
+        return f"{base}/{quote(root_rel_path)}"
 
     if not zip_filename:
         msg = "zip_filename is required when package='zip'"
         raise ValueError(msg)
-    return f"{base}/{quote(zip_filename, safe='')}#{root_rel_path}"
+    return f"{base}/{quote(zip_filename, safe='')}#{quote(root_rel_path)}"
 
 
 def add_input_data(
@@ -560,7 +560,7 @@ def add_input_data(
         media_type = "application/octet-stream"
 
     dist: dict = {
-        "@id": rel_file_path,
+        "@id": quote(rel_file_path),
         "@type": "dcat:Distribution",
         "dcat:mediaType": media_type,
     }
@@ -650,7 +650,7 @@ def add_data(
         raise ValueError(msg)
 
     dist: dict = {
-        "@id": rel_file_path,
+        "@id": quote(rel_file_path),
         "@type": "dcat:Distribution",
         **additions,
         **extras,
