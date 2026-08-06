@@ -149,13 +149,20 @@ def write_rocrate(
                     },
                 )
                 label_extra_ents.append(ent)
-                sample_file_entities.append(ent)
+                # shared inputs living outside the sample folder (e.g. the root
+                # publication info xlsx) stay out of the sample's hasPart
+                if path.is_relative_to(sample_folder):
+                    sample_file_entities.append(ent)
             if label_extra_ents:
                 extra_entities[label] = label_extra_ents
 
         for label, paths in tracked_by_sample_folder.get(sample_folder, {}).items():
             if label == "metadata":
-                derived_from = extra_entities.get("battinfo_xlsx") or None
+                derived_from = [
+                    ent
+                    for extra_label in ("battinfo_xlsx", "pub_info")
+                    for ent in extra_entities.get(extra_label, [])
+                ] or None
             else:
                 derived_from = input_entities.get(label) or all_input_entities or None
             for path in paths:
