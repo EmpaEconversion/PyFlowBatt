@@ -507,7 +507,9 @@ def analyse_sample(
                     merge_list.append(
                         battinfo.add_institution(
                             pub_info["institution"],
-                            pub_info.get("institutions", {}).get(pub_info["institution"]),
+                            pub_info.get("institutions", {})
+                            .get(pub_info["institution"], {})
+                            .get("wikidata_url"),
                         )
                     )
                 if pub_info.get("authors") and pub_info.get("institutions"):
