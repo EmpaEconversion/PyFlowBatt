@@ -1,10 +1,10 @@
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["flit_core>=3.12,<4"]
+build-backend = "flit_core.buildapi"
 
 [project]
 name = "pyflowbatt"
-dynamic = ["version"]
+version = "0.2.0rc1"
 description = "Tools for analysing data from the flow battery lab at Empa"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -21,9 +21,8 @@ dependencies = [
     "tomli>=2.0.0; python_version < '3.11'",
 ]
 
-[project.optional-dependencies]
+[dependency-groups]
 dev = [
-    "bumpver>=2025.1131",
     "pytest>=8.4.2",
     "ruff>=0.13.2",
     "pre-commit>=4.2.0",
@@ -33,8 +32,8 @@ dev = [
 pyflowbatt = "pyflowbatt.cli:main"
 flussli = "pyflowbatt.cli:main"
 
-[tool.hatch.version]
-path = "pyflowbatt/version.py"
+[tool.uv]
+default-groups = ["dev"]
 
 [tool.ruff]
 line-length = 100  # Set the maximum line length
@@ -63,21 +62,4 @@ disable_error_code = ["import-untyped"]
 exclude = [
     "test\\.py$", # files end with test.py
     "^test", # files that start with test
-]
-
-[tool.bumpver]
-current_version = "v0.2.0rc1"
-version_pattern = "vMAJOR.MINOR.PATCH[PYTAGNUM]"
-commit_message = "Bump version {old_version} -> {new_version}."
-tag_message = "Release {new_version}."
-tag_scope = "default"
-pre_commit_hook = ""
-post_commit_hook = ""
-commit = true
-tag = true
-push = true
-
-[tool.bumpver.file_patterns]
-"pyflowbatt/version.py" = [
-    '__version__ = "{pep440_version}"',
 ]

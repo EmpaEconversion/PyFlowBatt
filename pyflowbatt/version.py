@@ -1,6 +1,8 @@
 """Version information for PyFlowBatt."""
 
-__version__ = "0.2.0rc1"
+from importlib.metadata import version
+
+__version__ = version("pyflowbatt")
 __title__ = "PyFlowBatt"
 __copyright__ = "2025, Empa"
 __description__ = """

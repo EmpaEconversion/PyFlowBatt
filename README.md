@@ -65,13 +65,13 @@ analyse_all_samples("path/to/parent/folder/of/many/samples")
 
 If you find bugs, or want new features, open an *issue* on the GitHub page.
 
-If you want to directly contribute to the project, first clone the repo and install it as editable with developer dependencies:
+If you want to directly contribute to the project, it is easiest to use the tool 'uv':
 ```
 git clone https://github.com/empaeconversion/pyflowbatt.git
 
 cd pyflowbatt
 
-pip install -e .[dev]
+uv sync
 ```
 Then open this folder in an editor like VSCode.
 
