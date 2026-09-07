@@ -12,6 +12,8 @@ from urllib.parse import quote
 
 import pandas as pd
 
+from pyflowbatt.version import __title__, __url__, __version__
+
 logger = logging.getLogger(__name__)
 
 
@@ -809,6 +811,34 @@ def add_institution(
         inst_dict["hasOutput"]["dc:publisher"]["@id"] = wikidata_url
     inst_dict["hasOutput"]["dc:publisher"]["schema:name"] = name
     return inst_dict
+
+
+def add_software(
+    name: str = __title__,
+    version: str = __version__,
+    url: str = __url__,
+) -> dict:
+    """Record the software that generated the output dataset.
+
+    Mirrors the RO-Crate manifest, which describes the same run as a CreateAction
+    with the software as its instrument.
+    """
+    return {
+        "@type": "BatteryTest",
+        "hasOutput": {
+            "prov:wasGeneratedBy": {
+                "@type": ["prov:Activity", "schema:CreateAction"],
+                "schema:name": f"{name} analysis",
+                "schema:endTime": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "schema:instrument": {
+                    "@id": url,
+                    "@type": "schema:SoftwareApplication",
+                    "schema:name": name,
+                    "schema:softwareVersion": version,
+                },
+            },
+        },
+    }
 
 
 def parse_zenodo_info_xlsx(

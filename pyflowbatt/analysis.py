@@ -503,7 +503,11 @@ def analyse_sample(
             battinfo_json = battinfo.make_test_object(raw_json)
 
             # Create list of everything that can be included in JSON-LD
-            merge_list = [battinfo_json, battinfo.add_input_and_output()]
+            merge_list = [
+                battinfo_json,
+                battinfo.add_input_and_output(),
+                battinfo.add_software(),
+            ]
             if pub_info:
                 if pub_info.get("zenodo_doi_url"):
                     merge_list.append(battinfo.add_zenodo_url(pub_info["zenodo_doi_url"]))
