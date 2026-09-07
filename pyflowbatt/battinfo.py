@@ -12,6 +12,8 @@ from urllib.parse import quote
 
 import pandas as pd
 
+from pyflowbatt.version import __title__, __url__, __version__
+
 logger = logging.getLogger(__name__)
 
 
@@ -519,12 +521,12 @@ def zenodo_download_url(
     record_id = zenodo_record_id(zenodo_doi_url)
     base = f"https://zenodo.org/records/{record_id}/files"
     if package == "files":
-        return f"{base}/{quote(root_rel_path, safe='/')}"
+        return f"{base}/{quote(root_rel_path)}"
 
     if not zip_filename:
         msg = "zip_filename is required when package='zip'"
         raise ValueError(msg)
-    return f"{base}/{quote(zip_filename, safe='')}#{root_rel_path}"
+    return f"{base}/{quote(zip_filename, safe='')}#{quote(root_rel_path)}"
 
 
 def add_input_data(
@@ -560,7 +562,7 @@ def add_input_data(
         media_type = "application/octet-stream"
 
     dist: dict = {
-        "@id": rel_file_path,
+        "@id": quote(rel_file_path),
         "@type": "dcat:Distribution",
         "dcat:mediaType": media_type,
     }
@@ -650,7 +652,7 @@ def add_data(
         raise ValueError(msg)
 
     dist: dict = {
-        "@id": rel_file_path,
+        "@id": quote(rel_file_path),
         "@type": "dcat:Distribution",
         **additions,
         **extras,
@@ -809,6 +811,34 @@ def add_institution(
         inst_dict["hasOutput"]["dc:publisher"]["@id"] = wikidata_url
     inst_dict["hasOutput"]["dc:publisher"]["schema:name"] = name
     return inst_dict
+
+
+def add_software(
+    name: str = __title__,
+    version: str = __version__,
+    url: str = __url__,
+) -> dict:
+    """Record the software that generated the output dataset.
+
+    Mirrors the RO-Crate manifest, which describes the same run as a CreateAction
+    with the software as its instrument.
+    """
+    return {
+        "@type": "BatteryTest",
+        "hasOutput": {
+            "prov:wasGeneratedBy": {
+                "@type": ["prov:Activity", "schema:CreateAction"],
+                "schema:name": f"{name} analysis",
+                "schema:endTime": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "schema:instrument": {
+                    "@id": url,
+                    "@type": "schema:SoftwareApplication",
+                    "schema:name": name,
+                    "schema:softwareVersion": version,
+                },
+            },
+        },
+    }
 
 
 def parse_zenodo_info_xlsx(

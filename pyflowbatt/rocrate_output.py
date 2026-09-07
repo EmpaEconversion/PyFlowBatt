@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
+from rocrate.model import ContextEntity, SoftwareApplication
 from rocrate.rocrate import ROCrate
 
 from pyflowbatt.analysis import (
@@ -15,6 +17,7 @@ from pyflowbatt.analysis import (
     get_sampleid_from_folderpath,
 )
 from pyflowbatt.config import PyFlowBattConfig, classify_technique_files
+from pyflowbatt.version import __title__, __url__, __version__
 
 MEASUREMENT_LABELS: dict[str, str] = {
     "gcpl": "Galvanostatic Cycling with Potential Limitation",
@@ -28,6 +31,8 @@ MEASUREMENT_LABELS: dict[str, str] = {
     "eis_post-50%SOC": "Electrochemical Impedance Spectroscopy (post-cycling, 50% SOC)",
     "eis_post": "Electrochemical Impedance Spectroscopy (post-cycling, 0% SOC)",
 }
+
+LICENSE_URL = "https://creativecommons.org/licenses/by/4.0/"
 
 ENCODING_FORMATS: dict[str, str] = {
     ".parquet": "application/x-parquet",
@@ -65,6 +70,46 @@ def _classify_inputs(
     return classify_technique_files(sample_folder, config)
 
 
+def _add_license(crate: ROCrate) -> None:
+    """Describe the crate licence as a contextual entity, not just a bare URL."""
+    license_entity = crate.add(
+        ContextEntity(
+            crate,
+            identifier=LICENSE_URL,
+            properties={
+                "@type": "CreativeWork",
+                "name": "CC BY 4.0",
+                "description": "Creative Commons Attribution 4.0 International License",
+            },
+        )
+    )
+    crate.root_dataset["license"] = license_entity
+
+
+def _add_software_provenance(crate: ROCrate) -> None:
+    """Record which PyFlowBatt release built the crate."""
+    software = crate.add(
+        SoftwareApplication(
+            crate,
+            identifier=__url__,
+            properties={
+                "name": __title__,
+                "version": __version__,
+                "url": {"@id": __url__},
+            },
+        )
+    )
+    crate.add_action(
+        software,
+        identifier="#pyflowbatt-run",
+        object=crate.root_dataset,
+        properties={
+            "name": "RO-Crate created",
+            "endTime": datetime.now().astimezone().isoformat(timespec="seconds"),
+        },
+    )
+
+
 def write_rocrate(
     root_folder: Path,
     sample_folders: list[Path],
@@ -80,7 +125,8 @@ def write_rocrate(
     crate.root_dataset["description"] = (
         f"Flow battery electrochemical analysis produced by PyFlowBatt for {root_folder.name}"
     )
-    crate.root_dataset["license"] = {"@id": "https://creativecommons.org/licenses/by/4.0/"}
+    _add_license(crate)
+    _add_software_provenance(crate)
 
     all_sample_datasets = []
 
@@ -149,13 +195,20 @@ def write_rocrate(
                     },
                 )
                 label_extra_ents.append(ent)
-                sample_file_entities.append(ent)
+                # shared inputs living outside the sample folder (e.g. the root
+                # publication info xlsx) stay out of the sample's hasPart
+                if path.is_relative_to(sample_folder):
+                    sample_file_entities.append(ent)
             if label_extra_ents:
                 extra_entities[label] = label_extra_ents
 
         for label, paths in tracked_by_sample_folder.get(sample_folder, {}).items():
             if label == "metadata":
-                derived_from = extra_entities.get("battinfo_xlsx") or None
+                derived_from = [
+                    ent
+                    for extra_label in ("battinfo_xlsx", "pub_info")
+                    for ent in extra_entities.get(extra_label, [])
+                ] or None
             else:
                 derived_from = input_entities.get(label) or all_input_entities or None
             for path in paths:

@@ -122,6 +122,7 @@ OUTPUT_MISC_DESCRIPTIONS: dict[str, str] = {
 EXTRA_INPUT_DESCRIPTIONS: dict[str, str] = {
     "protocol": "EC-Lab measurement protocol (.mps)",
     "battinfo_xlsx": "BattINFO converter Excel metadata input",
+    "pub_info": "Publication and Zenodo deposition Excel metadata input",
 }
 
 
@@ -285,9 +286,10 @@ def _extract_electrode_area_cm2(raw_battinfo_json: dict, electrode_key: str) -> 
         if not isinstance(prop, dict) or prop.get("@type") != "Area":
             continue
         unit = prop.get("hasMeasurementUnit")
-        if unit != "unit:CentiM2":
+        if unit not in {"unit:CentiM2", "SquareCentiMetre", "emmo:SquareCentiMetre"}:
             logger.warning(
-                "Ignoring %s Area with unit %s in BattINFO file (expected unit:CentiM2)",
+                "Ignoring %s Area with unit %s in BattINFO file "
+                "(expected unit:CentiM2 or SquareCentiMetre)",
                 electrode_key,
                 unit,
             )
@@ -405,6 +407,7 @@ def analyse_sample(
     folder: str | Path,
     *,
     pub_info: dict | None = None,
+    pub_info_path: str | Path | None = None,
     save_format: SAVE_FORMATS = "parquet",
     config: PyFlowBattConfig | None = None,
     root_folder: str | Path | None = None,
@@ -425,6 +428,9 @@ def analyse_sample(
     ``zenodo_package`` or Zenodo upload, so the two documents can be cross-referenced by
     "@id" alone.
 
+    ``pub_info_path`` is the xlsx ``pub_info`` was parsed from; when given it is recorded
+    as an input alongside the protocol and BattINFO xlsx files.
+
     ``zenodo_package`` controls how the resolved "dcat:downloadURL" (a separate property
     from "@id") points at Zenodo-hosted files, once ``pub_info["zenodo_doi_url"]`` is
     known: "files" (default) points directly at each file's own Zenodo download URL
@@ -434,6 +440,7 @@ def analyse_sample(
     folder = Path(folder)
     root_folder = Path(root_folder) if root_folder is not None else folder
     pub_info = pub_info or {}
+    pub_info_path = Path(pub_info_path) if pub_info_path is not None else None
     fcid: str | None = None
     config = config or PyFlowBattConfig.load(folder)
 
@@ -496,7 +503,11 @@ def analyse_sample(
             battinfo_json = battinfo.make_test_object(raw_json)
 
             # Create list of everything that can be included in JSON-LD
-            merge_list = [battinfo_json, battinfo.add_input_and_output()]
+            merge_list = [
+                battinfo_json,
+                battinfo.add_input_and_output(),
+                battinfo.add_software(),
+            ]
             if pub_info:
                 if pub_info.get("zenodo_doi_url"):
                     merge_list.append(battinfo.add_zenodo_url(pub_info["zenodo_doi_url"]))
@@ -506,7 +517,9 @@ def analyse_sample(
                     merge_list.append(
                         battinfo.add_institution(
                             pub_info["institution"],
-                            pub_info.get("institutions", {}).get(pub_info["institution"]),
+                            pub_info.get("institutions", {})
+                            .get(pub_info["institution"], {})
+                            .get("wikidata_url"),
                         )
                     )
                 if pub_info.get("authors") and pub_info.get("institutions"):
@@ -806,6 +819,8 @@ def analyse_sample(
         tracked_extra_inputs["protocol"] = mps_files
     if battinfo_xlsx_path:
         tracked_extra_inputs["battinfo_xlsx"] = [battinfo_xlsx_path]
+    if pub_info_path and pub_info_path != battinfo_xlsx_path:
+        tracked_extra_inputs["pub_info"] = [pub_info_path]
 
     if battinfo_json is not None:
         zenodo_url = pub_info.get("zenodo_doi_url") if pub_info else None
@@ -834,6 +849,15 @@ def analyse_sample(
                 _rel(battinfo_xlsx_path, root_folder),
                 zenodo_url,
                 EXTRA_INPUT_DESCRIPTIONS["battinfo_xlsx"],
+                package=zenodo_package,
+                zip_filename=zenodo_zip_filename,
+            )
+            battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
+        for path in tracked_extra_inputs.get("pub_info", []):
+            snippet = battinfo.add_input_data(
+                _rel(path, root_folder),
+                zenodo_url,
+                EXTRA_INPUT_DESCRIPTIONS["pub_info"],
                 package=zenodo_package,
                 zip_filename=zenodo_zip_filename,
             )
@@ -995,7 +1019,7 @@ def analyse_all_samples(
     directly, for uploading every file individually.
     """
     folder = Path(folder).resolve()
-    pub_info = pub_info_from_root(folder)
+    pub_info, pub_info_path = pub_info_from_root(folder)
     zenodo_package: Literal["zip", "files"] = "zip" if zip_output else "files"
     zip_filename = pub_info.get("zenodo_zip_filename") or f"{folder.name}.zip"
     if zip_output:
@@ -1026,6 +1050,7 @@ def analyse_all_samples(
             sample_folder,
             save_format=save_format,
             pub_info=pub_info,
+            pub_info_path=pub_info_path,
             config=configs_by_sample_folder[sample_folder],
             root_folder=folder,
             zenodo_package=zenodo_package,
@@ -1075,6 +1100,7 @@ def dry_analyse_all_samples(
     logger.info("Beginning dry-run search.")
     folder = Path(folder).resolve()
     config = PyFlowBattConfig.load(folder)
+    pub_info, pub_info_path = pub_info_from_root(folder)
     sample_folders = find_all_sample_folders(folder, max_search_depth, max_folder_searches, config)
     if len(sample_folders) == 0:
         logger.error("No sample folders found in %s", folder)
@@ -1099,6 +1125,11 @@ def dry_analyse_all_samples(
                 logger.info("      - %-*s %s", tag_width + 1, f"{tag}:", file.name)
         else:
             logger.info("      (no recognised technique files found)")
+    if pub_info_path:
+        logger.info(
+            "I would read publication info from '%s' and record it as a metadata input.",
+            pub_info_path.name,
+        )
     logger.info(
         "In each sample folder, I would analyse this data and make a 'results' subfolder inside."
     )
@@ -1110,7 +1141,6 @@ def dry_analyse_all_samples(
             folder.name,
         )
     if zip_output:
-        pub_info = pub_info_from_root(folder)
         zip_filename = pub_info.get("zenodo_zip_filename") or f"{folder.name}.zip"
         logger.info("Then I would zip everything and output to %s.", folder.parent / zip_filename)
         logger.info("BattINFO metadata would reference files via that zip's download URL.")
@@ -1119,10 +1149,13 @@ def dry_analyse_all_samples(
         logger.info("BattINFO metadata would reference each file's own download URL.")
 
 
-def pub_info_from_root(folder: Path) -> dict:
-    """Get publication info from xlsx in root folder."""
+def pub_info_from_root(folder: Path) -> tuple[dict, Path | None]:
+    """Get publication info, and the xlsx it came from, from the root folder.
+
+    Returns an empty dict and None when no xlsx in the folder parses as publication info.
+    """
     candidate_files = folder.glob("*.xlsx")
     for file in candidate_files:
         with contextlib.suppress(Exception):
-            return battinfo.parse_zenodo_info_xlsx(file)
-    return {}
+            return battinfo.parse_zenodo_info_xlsx(file), file
+    return {}, None

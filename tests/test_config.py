@@ -322,6 +322,39 @@ def test_analyse_sample_default_package_is_files_and_root_relative(
     assert local_terms["@base"] == "https://zenodo.org/records/20338409/"
 
 
+def test_analyse_sample_records_pub_info_xlsx_as_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The root publication info xlsx is tracked as an input of the sample's metadata."""
+    from pyflowbatt import analysis as analysis_module
+
+    root = tmp_path / "project"
+    sample = root / "sample_01"
+    sample.mkdir(parents=True)
+    (sample / "metadata.xlsx").write_text("x")
+    pub_info_xlsx = root / "publication_info.xlsx"
+    pub_info_xlsx.write_text("x")
+
+    monkeypatch.setattr(analysis_module, "convert_excel_to_jsonld", _fake_convert)
+
+    config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
+    _outputs, extra_inputs, _fcid, _sample_id = analysis_module.analyse_sample(
+        sample,
+        save_format=None,
+        config=config,
+        root_folder=root,
+        pub_info={"zenodo_doi_url": "https://doi.org/10.5281/zenodo.20338409"},
+        pub_info_path=pub_info_xlsx,
+    )
+
+    assert extra_inputs["pub_info"] == [pub_info_xlsx]
+
+    metadata = json.loads((sample / "metadata.empa__fcid123456.json").read_text())
+    assert "publication_info.xlsx" in _all_ids(metadata["hasInput"])
+    expected = "https://zenodo.org/records/20338409/files/publication_info.xlsx"
+    assert expected in _all_download_urls(metadata["hasInput"])
+
+
 def test_analyse_sample_zip_package_id_points_at_zip_with_path_fragment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
