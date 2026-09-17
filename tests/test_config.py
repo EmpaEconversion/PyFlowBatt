@@ -94,6 +94,92 @@ def test_extra_patterns_merge_not_replace(tmp_path: Path) -> None:
     assert any("_GCPL_" in name for name in eis_names)
 
 
+def _write_two_eis_sample(folder: Path) -> Path:
+    """Early-protocol layout: EIS before cycling, main GCPL, EIS after cycling."""
+    folder.mkdir(parents=True, exist_ok=True)
+    for name in ("s_01_OCV_A", "s_02_PEIS_A", "s_03_LSV_A", "s_05_GCPL_A", "s_06_PEIS_A"):
+        (folder / f"{name}.mpr").write_text("x")
+    return folder
+
+
+def test_two_eis_files_default_positional_tagging(tmp_path: Path) -> None:
+    """Without eis_tags, the second of two EIS files gets the second tag (pre-50%SOC)."""
+    sample = _write_two_eis_sample(tmp_path / "sample")
+    config = PyFlowBattConfig.load(sample, home=tmp_path / "home")
+
+    classified = classify_technique_files(sample, config)
+
+    assert classified["eis_pre"][0].name == "s_02_PEIS_A.mpr"
+    assert classified["eis_pre-50%SOC"][0].name == "s_06_PEIS_A.mpr"
+    assert "eis_post" not in classified
+
+
+def test_eis_tags_pin_files_to_tags(tmp_path: Path) -> None:
+    """eis_tags in pyflowbatt.toml assigns each EIS file to the given tag."""
+    sample = _write_two_eis_sample(tmp_path / "sample")
+    (sample / "pyflowbatt.toml").write_text(
+        '[eis_tags]\n"pre" = ["*_02_PEIS_*"]\n"post" = ["*_06_PEIS_*"]\n'
+    )
+    config = PyFlowBattConfig.load(sample, home=tmp_path / "home")
+    assert config.eis_tag_patterns == {"pre": ["*_02_PEIS_*"], "post": ["*_06_PEIS_*"]}
+
+    classified = classify_technique_files(sample, config)
+
+    eis = {k: v[0].name for k, v in classified.items() if k.startswith("eis_")}
+    assert eis == {"eis_pre": "s_02_PEIS_A.mpr", "eis_post": "s_06_PEIS_A.mpr"}
+
+
+def test_eis_tags_partial_fills_remaining_tags_in_order(tmp_path: Path) -> None:
+    """Tags not listed in eis_tags are filled in filename order from the unpinned files."""
+    sample = _write_two_eis_sample(tmp_path / "sample")
+    (sample / "pyflowbatt.toml").write_text('[eis_tags]\n"post" = ["*_06_PEIS_*"]\n')
+    config = PyFlowBattConfig.load(sample, home=tmp_path / "home")
+
+    classified = classify_technique_files(sample, config)
+
+    eis = {k: v[0].name for k, v in classified.items() if k.startswith("eis_")}
+    assert eis == {"eis_pre": "s_02_PEIS_A.mpr", "eis_post": "s_06_PEIS_A.mpr"}
+
+
+def test_eis_tags_sample_folder_overrides_parent(tmp_path: Path) -> None:
+    """A sample-level eis_tags entry replaces the parent's entry for the same tag."""
+    sample = _write_two_eis_sample(tmp_path / "parent" / "sample")
+    (tmp_path / "parent" / "pyflowbatt.toml").write_text(
+        '[eis_tags]\n"post-50%SOC" = ["*_06_PEIS_*"]\n"pre" = ["*_02_PEIS_*"]\n'
+    )
+    (sample / "pyflowbatt.toml").write_text('[eis_tags]\n"post-50%SOC" = ["*_99_PEIS_*"]\n')
+    config = PyFlowBattConfig.load(sample, home=tmp_path / "home")
+
+    assert config.eis_tag_patterns == {"post-50%SOC": ["*_99_PEIS_*"], "pre": ["*_02_PEIS_*"]}
+
+
+def test_eis_tags_bad_entries_ignored(tmp_path: Path) -> None:
+    """Unknown tags and non-list values in eis_tags are ignored."""
+    sample = _write_two_eis_sample(tmp_path / "sample")
+    (sample / "pyflowbatt.toml").write_text(
+        '[eis_tags]\n"during" = ["*_06_PEIS_*"]\n"post" = "*_06_PEIS_*"\n'
+    )
+    config = PyFlowBattConfig.load(sample, home=tmp_path / "home")
+
+    assert config.eis_tag_patterns == {}
+
+
+def test_eis_tags_no_match_falls_back_to_positional(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A pinned pattern matching nothing warns and falls back to positional tagging."""
+    sample = _write_two_eis_sample(tmp_path / "sample")
+    (sample / "pyflowbatt.toml").write_text('[eis_tags]\n"pre" = ["*_42_PEIS_*"]\n')
+    config = PyFlowBattConfig.load(sample, home=tmp_path / "home")
+
+    with caplog.at_level("WARNING"):
+        classified = classify_technique_files(sample, config, warn=True)
+
+    eis = {k: v[0].name for k, v in classified.items() if k.startswith("eis_")}
+    assert eis == {"eis_pre": "s_02_PEIS_A.mpr", "eis_pre-50%SOC": "s_06_PEIS_A.mpr"}
+    assert "No file matches eis_tags.pre" in caplog.text
+
+
 def test_shared_classifier_used_by_rocrate(tmp_path: Path) -> None:
     """RO-Crate's _classify_inputs delegates to the same classify_technique_files."""
     sample = _write_synthetic_sample(tmp_path / "sample")

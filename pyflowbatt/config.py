@@ -65,6 +65,10 @@ class PyFlowBattConfig:
         eis  = ["*_EIS_*"]    # adds to the built-in *_PEIS_*
         gcpl = ["*_GCD_*"]
 
+        [eis_tags]            # pin EIS files to tags instead of filename order
+        "pre"  = ["*_02_PEIS_*"]
+        "post" = ["*_06_PEIS_*"]
+
         [cv]
         v_min = 0.4     # voltage window used to plot
         v_max = 0.6
@@ -91,6 +95,8 @@ class PyFlowBattConfig:
     cv_post_patterns: list[str] = field(default_factory=lambda: ["*_CVApost*", "*_CVpost*"])
     eis_patterns: list[str] = field(default_factory=lambda: ["*_PEIS_*"])
     extensions: list[str] = field(default_factory=lambda: [".mpr"])
+    # EIS tag -> glob patterns; tags not listed are assigned in filename order
+    eis_tag_patterns: dict[str, list[str]] = field(default_factory=dict)
     sample_name_pattern: str = r"^\d+_.+_.+$"
     sample_name: str | None = None  # overrides pattern entirely
     lsv_threshold: int = 8  # numeric cutoff for pre/post when only one LSV file is found
@@ -170,6 +176,20 @@ class PyFlowBattConfig:
                 for v in values:
                     if v not in current:
                         current.append(v)
+
+        eis_tags = data.get("eis_tags", {})
+        for tag, values in eis_tags.items():
+            if tag not in EIS_TAGS:
+                logger.warning(
+                    "Ignoring unknown eis_tags.%s in %s (expected one of %s)", tag, path, EIS_TAGS
+                )
+                continue
+            if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
+                logger.warning(
+                    "Ignoring bad eis_tags.%s in %s (expected list of strings)", tag, path
+                )
+                continue
+            self.eis_tag_patterns[tag] = list(values)
 
         for key in ("extensions", "extra_extensions"):
             if key in data:
@@ -276,6 +296,13 @@ TEMPLATE_TOML = """\
 # cv_post = ["*_cyclic-voltammetry-post_*"]  # built-in: *_CVApost*, *_CVpost*
 # eis     = ["*_impedance_*"]                # built-in: *_PEIS_*
 
+# --- Pin EIS files to specific tags (default: tagged in filename order) ---
+# Tags: "pre", "pre-50%SOC", "post-50%SOC", "post". Unlisted tags are filled in
+# filename order from the remaining EIS files.
+# [eis_tags]
+# "pre"  = ["*_02_PEIS_*"]
+# "post" = ["*_06_PEIS_*"]
+
 # --- CV analysis parameters ---
 # [cv]
 # v_min = 0.4004   # voltage window used to compute scan rate
@@ -325,7 +352,7 @@ def classify_technique_files(
     lsv_pre, lsv_post, cv_pre, cv_post, eis_pre, eis_pre-50%SOC, eis_post-50%SOC,
     eis_post. Each value is the single-element list of the file selected for that
     label (largest-by-size for gcpl, first-match for ocv/cv, numeric pre/post split
-    for lsv, positional tagging for eis).
+    for lsv, `eis_tag_patterns` then positional tagging for eis).
 
     Pass warn=True to emit the ambiguity warnings analyse_sample historically
     logged inline. Call this with warn=True only once per sample per run (the
@@ -376,8 +403,34 @@ def classify_technique_files(
             logger.warning("More than one CV file, only reading %s", cv_post_files[0].stem)
         result["cv_post"] = [cv_post_files[0]]
 
-    eis_files = sorted(_glob_many(folder, config.eis_patterns, config.extensions))
-    for tag, f in zip(EIS_TAGS, eis_files, strict=False):
-        result[f"eis_{tag}"] = [f]
+    result.update(_classify_eis(folder, config, warn=warn))
 
+    return result
+
+
+def _classify_eis(folder: Path, config: PyFlowBattConfig, *, warn: bool) -> dict[str, list[Path]]:
+    """Tag EIS files from `eis_tag_patterns`, then fill remaining tags in filename order."""
+    result: dict[str, list[Path]] = {}
+    pinned: set[Path] = set()
+    for tag in EIS_TAGS:
+        patterns = config.eis_tag_patterns.get(tag)
+        if not patterns:
+            continue
+        matches = sorted(_glob_many(folder, patterns, config.extensions))
+        if not matches:
+            if warn:
+                logger.warning("No file matches eis_tags.%s %s", tag, patterns)
+            continue
+        if warn and len(matches) > 1:
+            logger.warning(
+                "More than one file matches eis_tags.%s, only reading %s", tag, matches[0].stem
+            )
+        result[f"eis_{tag}"] = [matches[0]]
+        pinned.add(matches[0])
+
+    eis_files = sorted(_glob_many(folder, config.eis_patterns, config.extensions))
+    free_tags = [tag for tag in EIS_TAGS if f"eis_{tag}" not in result]
+    free_files = [f for f in eis_files if f not in pinned]
+    for tag, f in zip(free_tags, free_files, strict=False):
+        result[f"eis_{tag}"] = [f]
     return result
