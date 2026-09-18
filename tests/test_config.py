@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from pyflowbatt import config as config_module
 from pyflowbatt.config import PyFlowBattConfig, classify_technique_files
 from pyflowbatt.rocrate_output import _classify_inputs
 
@@ -87,10 +88,11 @@ def test_extra_patterns_merge_not_replace(tmp_path: Path) -> None:
     assert config.eis_patterns == ["*_PEIS_*", "*_GCPL_*"]
 
     classified = classify_technique_files(sample, config)
-    # Original PEIS match is still present as the first tag.
-    assert classified["eis_pre"][0].name == "sample_02_PEIS_A.mpr"
+    # Original PEIS match is still present as the first tag. Pulling GCPL files into the
+    # EIS pool makes the layout match no known protocol, so tags are numbered.
+    assert classified["eis_pre_1"][0].name == "sample_02_PEIS_A.mpr"
     # GCPL files now also show up under the later EIS tags (merged, not replaced).
-    eis_names = [classified[f"eis_{tag}"][0].name for tag in ("pre-50%SOC", "post-50%SOC", "post")]
+    eis_names = [paths[0].name for label, paths in classified.items() if label.startswith("eis_")]
     assert any("_GCPL_" in name for name in eis_names)
 
 
@@ -102,16 +104,121 @@ def _write_two_eis_sample(folder: Path) -> Path:
     return folder
 
 
-def test_two_eis_files_default_positional_tagging(tmp_path: Path) -> None:
-    """Without eis_tags, the second of two EIS files gets the second tag (pre-50%SOC)."""
+def test_one_eis_each_side_tagged_pre_and_post(tmp_path: Path) -> None:
+    """Early protocol: one EIS before and one after cycling are 0% SOC pre and post."""
     sample = _write_two_eis_sample(tmp_path / "sample")
     config = PyFlowBattConfig.load(sample, home=tmp_path / "home")
 
     classified = classify_technique_files(sample, config)
 
-    assert classified["eis_pre"][0].name == "s_02_PEIS_A.mpr"
-    assert classified["eis_pre-50%SOC"][0].name == "s_06_PEIS_A.mpr"
-    assert "eis_post" not in classified
+    eis = {k: v[0].name for k, v in classified.items() if k.startswith("eis_")}
+    assert eis == {"eis_pre": "s_02_PEIS_A.mpr", "eis_post": "s_06_PEIS_A.mpr"}
+
+
+def test_two_eis_each_side_keeps_soc_tags(tmp_path: Path) -> None:
+    """Standard protocol: two EIS each side keep the 0%/50% SOC tags."""
+    sample = _write_synthetic_sample(tmp_path / "sample")
+    config = PyFlowBattConfig.load(sample, home=tmp_path / "home")
+
+    classified = classify_technique_files(sample, config)
+
+    # Main cycling is the largest GCPL, step 06; EIS 02 and 05 are before it, 10 and 12 after.
+    assert classified["eis_pre"][0].name == "sample_02_PEIS_A.mpr"
+    assert classified["eis_pre-50%SOC"][0].name == "sample_05_PEIS_B.mpr"
+    assert classified["eis_post-50%SOC"][0].name == "sample_10_PEIS_C.mpr"
+    assert classified["eis_post"][0].name == "sample_12_PEIS_D.mpr"
+
+
+def test_unknown_eis_layout_gets_numbered_tags(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An EIS layout matching no known protocol warns and gets numbered pre/post tags."""
+    sample = tmp_path / "sample"
+    sample.mkdir()
+    for name in ("s_01_PEIS_A", "s_02_PEIS_A", "s_03_PEIS_A", "s_05_GCPL_A", "s_06_PEIS_A"):
+        (sample / f"{name}.mpr").write_text("x")
+    config = PyFlowBattConfig.load(sample, home=tmp_path / "home")
+
+    with caplog.at_level("WARNING"):
+        classified = classify_technique_files(sample, config, warn=True)
+
+    eis = {k: v[0].name for k, v in classified.items() if k.startswith("eis_")}
+    assert eis == {
+        "eis_pre_1": "s_01_PEIS_A.mpr",
+        "eis_pre_2": "s_02_PEIS_A.mpr",
+        "eis_pre_3": "s_03_PEIS_A.mpr",
+        "eis_post_1": "s_06_PEIS_A.mpr",
+    }
+    assert "3 before and 1 after" in caplog.text
+
+
+def test_unnumbered_filenames_split_by_acquisition_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without step numbers, EIS files are ordered and split by their recorded start time."""
+    sample = tmp_path / "sample"
+    sample.mkdir()
+    for name in ("cell_PEIS_alpha", "cell_PEIS_omega", "cell_GCPL_main"):
+        (sample / f"{name}.mpr").write_text("x")
+    # Filename order puts "alpha" first, but it was measured after cycling.
+    times = {"cell_PEIS_omega": 100.0, "cell_GCPL_main": 200.0, "cell_PEIS_alpha": 900.0}
+    monkeypatch.setattr(config_module, "_start_time", lambda p: times[p.stem])
+    config = PyFlowBattConfig.load(sample, home=tmp_path / "home")
+
+    classified = classify_technique_files(sample, config)
+
+    eis = {k: v[0].name for k, v in classified.items() if k.startswith("eis_")}
+    assert eis == {"eis_pre": "cell_PEIS_omega.mpr", "eis_post": "cell_PEIS_alpha.mpr"}
+
+
+def test_step_numbers_win_over_timestamps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Step numbers are used when present, so no file has to be parsed for a timestamp."""
+    sample = _write_two_eis_sample(tmp_path / "sample")
+
+    def fail(path: Path) -> float | None:
+        msg = f"should not read timestamps from {path}"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(config_module, "_start_time", fail)
+    config = PyFlowBattConfig.load(sample, home=tmp_path / "home")
+
+    classified = classify_technique_files(sample, config)
+
+    eis = {k: v[0].name for k, v in classified.items() if k.startswith("eis_")}
+    assert eis == {"eis_pre": "s_02_PEIS_A.mpr", "eis_post": "s_06_PEIS_A.mpr"}
+
+
+def test_unreadable_files_fall_back_to_filename_order(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With neither step numbers nor timestamps, EIS files keep filename-order tagging."""
+    sample = tmp_path / "sample"
+    sample.mkdir()
+    for name in ("cell_PEIS_before", "cell_PEIS_after", "cell_GCPL_main"):
+        (sample / f"{name}.mpr").write_text("x")
+    monkeypatch.setattr(config_module, "_start_time", lambda _p: None)
+    config = PyFlowBattConfig.load(sample, home=tmp_path / "home")
+
+    with caplog.at_level("WARNING"):
+        classified = classify_technique_files(sample, config, warn=True)
+
+    eis = {k: v[0].name for k, v in classified.items() if k.startswith("eis_")}
+    assert eis == {"eis_pre": "cell_PEIS_after.mpr", "eis_pre-50%SOC": "cell_PEIS_before.mpr"}
+    assert "before/after cycling" in caplog.text
+
+
+def test_eis_tagging_without_gcpl_falls_back_to_positional(tmp_path: Path) -> None:
+    """With no cycling step to split around, EIS files keep filename-order tagging."""
+    sample = tmp_path / "sample"
+    sample.mkdir()
+    for name in ("s_02_PEIS_A", "s_06_PEIS_A"):
+        (sample / f"{name}.mpr").write_text("x")
+    config = PyFlowBattConfig.load(sample, home=tmp_path / "home")
+
+    classified = classify_technique_files(sample, config)
+
+    eis = {k: v[0].name for k, v in classified.items() if k.startswith("eis_")}
+    assert eis == {"eis_pre": "s_02_PEIS_A.mpr", "eis_pre-50%SOC": "s_06_PEIS_A.mpr"}
 
 
 def test_eis_tags_pin_files_to_tags(tmp_path: Path) -> None:
@@ -167,7 +274,7 @@ def test_eis_tags_bad_entries_ignored(tmp_path: Path) -> None:
 def test_eis_tags_no_match_falls_back_to_positional(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A pinned pattern matching nothing warns and falls back to positional tagging."""
+    """A pinned pattern matching nothing warns and leaves the automatic tagging to decide."""
     sample = _write_two_eis_sample(tmp_path / "sample")
     (sample / "pyflowbatt.toml").write_text('[eis_tags]\n"pre" = ["*_42_PEIS_*"]\n')
     config = PyFlowBattConfig.load(sample, home=tmp_path / "home")
@@ -176,7 +283,7 @@ def test_eis_tags_no_match_falls_back_to_positional(
         classified = classify_technique_files(sample, config, warn=True)
 
     eis = {k: v[0].name for k, v in classified.items() if k.startswith("eis_")}
-    assert eis == {"eis_pre": "s_02_PEIS_A.mpr", "eis_pre-50%SOC": "s_06_PEIS_A.mpr"}
+    assert eis == {"eis_pre": "s_02_PEIS_A.mpr", "eis_post": "s_06_PEIS_A.mpr"}
     assert "No file matches eis_tags.pre" in caplog.text
 
 

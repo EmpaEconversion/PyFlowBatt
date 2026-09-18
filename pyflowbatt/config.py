@@ -18,6 +18,7 @@ CONFIG_FILENAME = "pyflowbatt.toml"
 EIS_TAGS = ["pre", "pre-50%SOC", "post-50%SOC", "post"]
 DEFAULT_AREA_CM2 = 5.0  # fallback electrode area (cm^2) when no toml or BattINFO value exists
 _LSV_NUMBER_RE = re.compile(r"_(\d+)_LSV_")
+_STEP_NUMBER_RE = re.compile(r"_(\d+)_[A-Za-z]")
 
 _TECHNIQUE_KEYS: dict[str, str] = {
     "gcpl": "gcpl_patterns",
@@ -327,6 +328,16 @@ def write_template_config(folder: str | Path) -> Path:
     return path
 
 
+def _step_number(path: Path) -> int | None:
+    """Technique step number from an EC-Lab filename, e.g. 5 for `cell_05_PEIS_C01`.
+
+    Takes the last match so a run counter earlier in the name (`..._50Cycles_2_02_PEIS_CE5`)
+    doesn't win over the step number.
+    """
+    matches = _STEP_NUMBER_RE.findall(path.stem)
+    return int(matches[-1]) if matches else None
+
+
 def _glob_many(folder: Path, patterns: list[str], extensions: list[str]) -> list[Path]:
     """All files in folder matching any pattern x extension combo, de-duplicated."""
     seen: set[Path] = set()
@@ -403,13 +414,20 @@ def classify_technique_files(
             logger.warning("More than one CV file, only reading %s", cv_post_files[0].stem)
         result["cv_post"] = [cv_post_files[0]]
 
-    result.update(_classify_eis(folder, config, warn=warn))
+    gcpl_file = result["gcpl"][0] if "gcpl" in result else None
+    result.update(_classify_eis(folder, config, gcpl_file, warn=warn))
 
     return result
 
 
-def _classify_eis(folder: Path, config: PyFlowBattConfig, *, warn: bool) -> dict[str, list[Path]]:
-    """Tag EIS files from `eis_tag_patterns`, then fill remaining tags in filename order."""
+def _classify_eis(
+    folder: Path, config: PyFlowBattConfig, gcpl_file: Path | None, *, warn: bool
+) -> dict[str, list[Path]]:
+    """Tag EIS files, splitting them around the main cycling step.
+
+    Files pinned by `eis_tag_patterns` win; any remaining files are tagged in
+    filename order if pins exist, otherwise by :func:`_eis_order_and_tags`.
+    """
     result: dict[str, list[Path]] = {}
     pinned: set[Path] = set()
     for tag in EIS_TAGS:
@@ -429,8 +447,92 @@ def _classify_eis(folder: Path, config: PyFlowBattConfig, *, warn: bool) -> dict
         pinned.add(matches[0])
 
     eis_files = sorted(_glob_many(folder, config.eis_patterns, config.extensions))
-    free_tags = [tag for tag in EIS_TAGS if f"eis_{tag}" not in result]
     free_files = [f for f in eis_files if f not in pinned]
-    for tag, f in zip(free_tags, free_files, strict=False):
+    if not free_files:
+        return result
+
+    # With pins in play, the remaining files just fill whatever tags are left over.
+    if pinned:
+        ordered = free_files
+        tags = [tag for tag in EIS_TAGS if f"eis_{tag}" not in result]
+    else:
+        ordered, tags = _eis_order_and_tags(free_files, gcpl_file, warn=warn)
+    for tag, f in zip(tags, ordered, strict=False):
         result[f"eis_{tag}"] = [f]
     return result
+
+
+def _start_time(path: Path) -> float | None:
+    """Read the acquisition start time (unix seconds) recorded inside an EC-Lab .mpr."""
+    if path.suffix.lower() != ".mpr":
+        return None
+    try:
+        import yadg  # noqa: PLC0415
+
+        dataset = yadg.extractors.extract("eclab.mpr", path).to_dataset()
+        return float(dataset["uts"].values[0])
+    except Exception:  # noqa: BLE001  an unreadable file just means no timestamp
+        logger.debug("Could not read a start time from %s", path.name)
+        return None
+
+
+def _eis_sort_keys(
+    eis_files: list[Path], gcpl_file: Path | None
+) -> tuple[list[float] | None, float | None]:
+    """Put the EIS files and the cycling step on one common scale for ordering.
+
+    Filename step numbers are used when every file has one, as reading them is free.
+    Otherwise the acquisition timestamps inside the files are used, which is
+    authoritative but has to parse the (potentially large) cycling file.
+    """
+    gcpl_step = _step_number(gcpl_file) if gcpl_file else None
+    steps = [_step_number(f) for f in eis_files]
+    if gcpl_step is not None and all(step is not None for step in steps):
+        return [float(step) for step in steps if step is not None], float(gcpl_step)
+
+    gcpl_time = _start_time(gcpl_file) if gcpl_file else None
+    times = [_start_time(f) for f in eis_files]
+    if gcpl_time is not None and all(time is not None for time in times):
+        logger.debug("No step numbers in EIS filenames, ordering by acquisition time")
+        return [time for time in times if time is not None], gcpl_time
+
+    return None, None
+
+
+def _eis_order_and_tags(
+    eis_files: list[Path], gcpl_file: Path | None, *, warn: bool
+) -> tuple[list[Path], list[str]]:
+    """Order EIS files by when they ran and tag them by the protocol's layout.
+
+    Two before and two after cycling is the standard protocol (0% and 50% SOC, each
+    side); one before and one after is the early protocol (0% SOC either side). Any
+    other layout can't be mapped onto the SOC-specific tags, so files get numbered
+    `pre_N`/`post_N` tags instead. Falls back to filename order when neither step
+    numbers nor timestamps are readable.
+    """
+    keys, gcpl_key = _eis_sort_keys(eis_files, gcpl_file)
+    if keys is None or gcpl_key is None:
+        if warn:
+            logger.warning(
+                "Cannot tell which EIS files are before/after cycling, tagging in filename order"
+            )
+        return eis_files, EIS_TAGS
+
+    ordered = [f for _, f in sorted(zip(keys, eis_files, strict=True))]
+    before = [key for key in keys if key < gcpl_key]
+    after = [key for key in keys if key >= gcpl_key]
+    if len(before) == 2 and len(after) == 2:
+        return ordered, EIS_TAGS
+    if len(before) == 1 and len(after) == 1:
+        return ordered, ["pre", "post"]
+
+    if warn:
+        logger.warning(
+            "Unexpected EIS layout (%d before and %d after cycling), "
+            "tagging them pre_N/post_N instead of by state of charge",
+            len(before),
+            len(after),
+        )
+    tags = [f"pre_{i}" for i in range(1, len(before) + 1)]
+    tags += [f"post_{i}" for i in range(1, len(after) + 1)]
+    return ordered, tags
