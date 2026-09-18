@@ -423,6 +423,19 @@ def test_unreadable_gcpl_and_cv_do_not_abort_the_sample(
     assert raw_inputs["cv_pre"] == [sample / "sample_CVApre_A.mpr"]
 
 
+def test_raw_description_names_the_format_only_for_mpr() -> None:
+    """ "(EC-Lab MPR)" is only appended to descriptions of actual .mpr files."""
+    from pyflowbatt import analysis as analysis_module
+
+    mpr = analysis_module.raw_description("lsv_pre", Path("cell_03_LSV_A.mpr"))
+    parquet = analysis_module.raw_description("lsv_pre", Path("cell_03_LSV_A.bdf.parquet"))
+    numbered = analysis_module.raw_description("eis_post_1", Path("cell_10_PEIS_A.csv"))
+
+    assert mpr == "Pre-cycling linear sweep voltammetry (EC-Lab MPR)"
+    assert parquet == "Pre-cycling linear sweep voltammetry"
+    assert numbered == "EIS measurement, after cycling, measurement 1"
+
+
 def test_rocrate_describes_unmatched_raw_data(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -454,7 +467,7 @@ def test_rocrate_describes_unmatched_raw_data(
     entities = {e["@id"]: e for e in crate["@graph"]}
     unmatched = entities["sample/sample_random_extra.mpr"]
     assert "measurementTechnique" not in unmatched
-    assert unmatched["description"] == analysis_module.OTHER_RAW_DESCRIPTION
+    assert unmatched["description"] == f"{analysis_module.OTHER_RAW_DESCRIPTION} (EC-Lab MPR)"
     # A file whose analysis failed keeps its technique and is still described.
     assert (
         "Electrochemical Impedance"
