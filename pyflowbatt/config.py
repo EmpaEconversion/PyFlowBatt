@@ -463,14 +463,24 @@ def _classify_eis(
 
 
 def _start_time(path: Path) -> float | None:
-    """Read the acquisition start time (unix seconds) recorded inside an EC-Lab .mpr."""
-    if path.suffix.lower() != ".mpr":
-        return None
-    try:
-        import yadg  # noqa: PLC0415
+    """Read the acquisition start time (unix seconds) recorded inside a data file.
 
-        dataset = yadg.extractors.extract("eclab.mpr", path).to_dataset()
-        return float(dataset["uts"].values[0])
+    Reads the .mpr timestamp directly, since parsing it through BDF columns would
+    cost the same but discard the raw `uts` field on files that have no BDF mapping.
+    """
+    try:
+        if path.suffix.lower() == ".mpr":
+            import yadg  # noqa: PLC0415
+
+            dataset = yadg.extractors.extract("eclab.mpr", path).to_dataset()
+            return float(dataset["uts"].values[0])
+
+        from pyflowbatt.read import read_to_bdf  # noqa: PLC0415
+
+        df = read_to_bdf(path)
+        if "Unix Time / s" not in df.columns:
+            return None
+        return float(df["Unix Time / s"].iloc[0])
     except Exception:  # noqa: BLE001  an unreadable file just means no timestamp
         logger.debug("Could not read a start time from %s", path.name)
         return None
