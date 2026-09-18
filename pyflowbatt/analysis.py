@@ -958,15 +958,14 @@ def analyse_sample(
                 else:
                     comment = OUTPUT_MISC_DESCRIPTIONS.get(label)
                 extras = {"rdfs:comment": comment} if comment else None
-                with contextlib.suppress(ValueError):
-                    snippet = battinfo.add_data(
-                        rel,
-                        zenodo_url,
-                        extras=extras,
-                        package=zenodo_package,
-                        zip_filename=zenodo_zip_filename,
-                    )
-                    battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
+                snippet = battinfo.add_data(
+                    rel,
+                    zenodo_url,
+                    extras=extras,
+                    package=zenodo_package,
+                    zip_filename=zenodo_zip_filename,
+                )
+                battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
         metadata_path = folder / f"metadata.{fcid or sample_id}.json"
         with metadata_path.open("w", encoding="utf-8") as mf:
             json.dump(battinfo_json, mf, indent=4, ensure_ascii=False)

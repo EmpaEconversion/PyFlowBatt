@@ -20,6 +20,7 @@ from pyflowbatt.analysis import (
     raw_description,
 )
 from pyflowbatt.config import PyFlowBattConfig, classify_technique_files
+from pyflowbatt.media_types import media_type
 from pyflowbatt.version import __title__, __url__, __version__
 
 MEASUREMENT_LABELS: dict[str, str] = {
@@ -47,14 +48,6 @@ def _measurement_technique(label: str) -> str:
 
 
 LICENSE_URL = "https://creativecommons.org/licenses/by/4.0/"
-
-ENCODING_FORMATS: dict[str, str] = {
-    ".parquet": "application/x-parquet",
-    ".csv": "text/csv",
-    ".png": "image/png",
-    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    ".mpr": "application/octet-stream",
-}
 
 
 def _output_description(label: str, path: Path) -> str | None:
@@ -179,9 +172,7 @@ def write_rocrate(
                     continue
                 raw_props: dict = {
                     "name": raw_path.stem,
-                    "encodingFormat": ENCODING_FORMATS.get(
-                        raw_path.suffix, ENCODING_FORMATS[".mpr"]
-                    ),
+                    "encodingFormat": media_type(raw_path),
                 }
                 if label == OTHER_RAW_LABEL:
                     raw_props["description"] = raw_description(label, raw_path)
@@ -217,9 +208,7 @@ def write_rocrate(
                     dest_path=_rel(path, root_folder),
                     properties={
                         "name": path.name,
-                        "encodingFormat": ENCODING_FORMATS.get(
-                            path.suffix, "application/octet-stream"
-                        ),
+                        "encodingFormat": media_type(path),
                         "description": desc,
                     },
                 )
@@ -243,13 +232,9 @@ def write_rocrate(
             for path in paths:
                 if not path.exists():
                     continue
-                ext = "".join(path.suffixes)
-                fmt = ENCODING_FORMATS.get(
-                    path.suffix, ENCODING_FORMATS.get(ext, "application/octet-stream")
-                )
                 props: dict = {
                     "name": path.name,
-                    "encodingFormat": fmt,
+                    "encodingFormat": media_type(path),
                     "wasDerivedFrom": derived_from,
                 }
                 desc = _output_description(label, path)
@@ -269,7 +254,7 @@ def write_rocrate(
             dest_path="combined_summary.xlsx",
             properties={
                 "name": "combined_summary.xlsx",
-                "encodingFormat": ENCODING_FORMATS[".xlsx"],
+                "encodingFormat": media_type(combined_summary),
                 "wasDerivedFrom": all_sample_datasets or None,
                 "description": "Combined per-sample summary across all cells",
             },
