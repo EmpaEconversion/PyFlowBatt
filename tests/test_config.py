@@ -436,6 +436,56 @@ def test_raw_description_names_the_format_only_for_mpr() -> None:
     assert numbered == "EIS measurement, after cycling, measurement 1"
 
 
+def test_media_types_agree_between_crate_and_battinfo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same file gets the same media type in the crate and the BattINFO JSON-LD."""
+    from pyflowbatt import analysis as analysis_module
+    from pyflowbatt.rocrate_output import write_rocrate
+
+    sample = _write_synthetic_sample(tmp_path / "sample")
+    (sample / "metadata.xlsx").write_text("x")
+    (sample / "sample_protocol.mps").write_text("EC-LAB SETTING FILE")
+    _stub_battinfo(monkeypatch, analysis_module)
+    config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
+    outputs, extras, raw_inputs, fcid, sample_id = analysis_module.analyse_sample(
+        sample, save_format=None, config=config, root_folder=tmp_path
+    )
+    write_rocrate(
+        tmp_path,
+        [sample],
+        {sample: outputs},
+        {sample: extras},
+        {sample: fcid},
+        {sample: config},
+        {sample: sample_id},
+        {sample: raw_inputs},
+    )
+
+    crate = json.loads((tmp_path / "ro-crate-metadata.json").read_text(encoding="utf-8"))
+    crate_types = {
+        e["@id"]: e["encodingFormat"] for e in crate["@graph"] if e.get("encodingFormat")
+    }
+    metadata_path = sample / "metadata.empa__fcid000001.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    battinfo_types = {
+        d["@id"]: d["dcat:mediaType"]
+        for section in ("hasOutput", "hasInput")
+        for d in metadata[section]["dcat:distribution"]
+        if d.get("dcat:mediaType")
+    }
+
+    assert crate_types["sample/sample_02_PEIS_A.mpr"] == "application/octet-stream"
+    assert crate_types["sample/sample_protocol.mps"] == "text/plain"
+    assert crate_types[f"sample/{metadata_path.name}"] == "application/ld+json"
+    # Raw .mpr files now carry a media type in the BattINFO JSON-LD too.
+    assert battinfo_types["sample/sample_02_PEIS_A.mpr"] == "application/octet-stream"
+    assert battinfo_types["sample/sample_protocol.mps"] == "text/plain"
+    for file_id, crate_type in crate_types.items():
+        if file_id in battinfo_types:
+            assert battinfo_types[file_id] == crate_type, file_id
+
+
 def test_rocrate_describes_unmatched_raw_data(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
