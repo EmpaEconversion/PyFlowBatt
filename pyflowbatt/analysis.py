@@ -24,20 +24,20 @@ SAVE_FORMATS = Literal["parquet", "csv"] | None
 DEFAULT_DEPTH = 6  # Default max search depth in folders
 DEFAULT_SEARCH = 10000  # Default max number of folders searched
 
-MPR_DESCRIPTIONS: dict[str, str] = {
-    "gcpl": "Galvanostatic cycling with potential limitation measurement (EC-Lab MPR)",
-    "ocv": "Open circuit voltage measurement (EC-Lab MPR)",
-    "lsv_pre": "Pre-cycling linear sweep voltammetry (EC-Lab MPR)",
-    "lsv_post": "Post-cycling linear sweep voltammetry (EC-Lab MPR)",
-    "cv_pre": "Pre-cycling cyclic voltammetry (EC-Lab MPR)",
-    "cv_post": "Post-cycling cyclic voltammetry (EC-Lab MPR)",
-    "eis_pre": "EIS measurement, pre-cycling (EC-Lab MPR)",
-    "eis_pre-50%SOC": "EIS measurement, pre-cycling 50% SOC (EC-Lab MPR)",
-    "eis_post-50%SOC": "EIS measurement, post-cycling 50% SOC (EC-Lab MPR)",
-    "eis_post": "EIS measurement, post-cycling (EC-Lab MPR)",
+RAW_INPUT_DESCRIPTIONS: dict[str, str] = {
+    "gcpl": "Galvanostatic cycling with potential limitation measurement",
+    "ocv": "Open circuit voltage measurement",
+    "lsv_pre": "Pre-cycling linear sweep voltammetry",
+    "lsv_post": "Post-cycling linear sweep voltammetry",
+    "cv_pre": "Pre-cycling cyclic voltammetry",
+    "cv_post": "Post-cycling cyclic voltammetry",
+    "eis_pre": "EIS measurement, pre-cycling",
+    "eis_pre-50%SOC": "EIS measurement, pre-cycling 50% SOC",
+    "eis_post-50%SOC": "EIS measurement, post-cycling 50% SOC",
+    "eis_post": "EIS measurement, post-cycling",
 }
 
-# Descriptions for the plot (.png) tracked outputs, keyed by the same labels as MPR_DESCRIPTIONS.
+# Descriptions for the plot (.png) tracked outputs, keyed by the same labels as the inputs.
 OUTPUT_PLOT_DESCRIPTIONS: dict[str, str] = {
     "gcpl": (
         "Plots of voltage vs. time, "
@@ -143,16 +143,20 @@ def _generic_eis_parts(label: str) -> tuple[str, str] | None:
     return ("before" if match.group(1) == "pre" else "after", match.group(2))
 
 
-def mpr_description(label: str) -> str | None:
-    """Describe a raw .mpr input for the given label."""
-    if label in MPR_DESCRIPTIONS:
-        return MPR_DESCRIPTIONS[label]
-    if label == OTHER_RAW_LABEL:
-        return OTHER_RAW_DESCRIPTION
-    if parts := _generic_eis_parts(label):
+def raw_description(label: str, path: Path) -> str | None:
+    """Describe a raw input file, naming the format only where we know what it is."""
+    if label in RAW_INPUT_DESCRIPTIONS:
+        description = RAW_INPUT_DESCRIPTIONS[label]
+    elif label == OTHER_RAW_LABEL:
+        description = OTHER_RAW_DESCRIPTION
+    elif parts := _generic_eis_parts(label):
         when, number = parts
-        return f"EIS measurement, {when} cycling, measurement {number} (EC-Lab MPR)"
-    return None
+        description = f"EIS measurement, {when} cycling, measurement {number}"
+    else:
+        return None
+    if path.suffix.lower() == ".mpr":
+        return f"{description} (EC-Lab MPR)"
+    return description
 
 
 def plot_description(label: str) -> str | None:
@@ -912,7 +916,7 @@ def analyse_sample(
                 snippet = battinfo.add_data(
                     _rel(path, root_folder),
                     zenodo_url,
-                    extras={"rdfs:comment": mpr_description(label)},
+                    extras={"rdfs:comment": raw_description(label, path)},
                     package=zenodo_package,
                     zip_filename=zenodo_zip_filename,
                 )

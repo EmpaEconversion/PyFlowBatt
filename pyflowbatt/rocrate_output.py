@@ -10,7 +10,6 @@ from rocrate.rocrate import ROCrate
 
 from pyflowbatt.analysis import (
     EXTRA_INPUT_DESCRIPTIONS,
-    OTHER_RAW_DESCRIPTION,
     OTHER_RAW_LABEL,
     OUTPUT_MISC_DESCRIPTIONS,
     _generic_eis_parts,
@@ -18,6 +17,7 @@ from pyflowbatt.analysis import (
     data_description,
     get_sampleid_from_folderpath,
     plot_description,
+    raw_description,
 )
 from pyflowbatt.config import PyFlowBattConfig, classify_technique_files
 from pyflowbatt.version import __title__, __url__, __version__
@@ -184,7 +184,7 @@ def write_rocrate(
                     ),
                 }
                 if label == OTHER_RAW_LABEL:
-                    raw_props["description"] = OTHER_RAW_DESCRIPTION
+                    raw_props["description"] = raw_description(label, raw_path)
                 else:
                     raw_props["measurementTechnique"] = _measurement_technique(label)
                 raw_entity = crate.add_file(
