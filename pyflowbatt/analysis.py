@@ -15,7 +15,7 @@ import pandas as pd
 from battinfoconverter_backend import convert_excel_to_jsonld
 
 from pyflowbatt import battinfo, cv, eis, gcpl, lsv, ocv
-from pyflowbatt.config import DEFAULT_AREA_CM2, EIS_TAGS, PyFlowBattConfig, classify_technique_files
+from pyflowbatt.config import DEFAULT_AREA_CM2, PyFlowBattConfig, classify_technique_files
 from pyflowbatt.read import read_to_bdf
 
 logger = logging.getLogger(__name__)
@@ -124,6 +124,55 @@ EXTRA_INPUT_DESCRIPTIONS: dict[str, str] = {
     "battinfo_xlsx": "BattINFO converter Excel metadata input",
     "pub_info": "Publication and Zenodo deposition Excel metadata input",
 }
+
+# Numbered EIS labels, used when a folder's EIS layout doesn't match a known protocol.
+# They carry no state of charge, so their descriptions only say which side of cycling
+# the measurement came from.
+_GENERIC_EIS_RE = re.compile(r"^eis_(pre|post)_(\d+)$")
+
+
+def _generic_eis_parts(label: str) -> tuple[str, str] | None:
+    """Split a numbered EIS label into ("before"|"after", number)."""
+    match = _GENERIC_EIS_RE.match(label)
+    if not match:
+        return None
+    return ("before" if match.group(1) == "pre" else "after", match.group(2))
+
+
+def mpr_description(label: str) -> str | None:
+    """Describe a raw .mpr input for the given label."""
+    if label in MPR_DESCRIPTIONS:
+        return MPR_DESCRIPTIONS[label]
+    if parts := _generic_eis_parts(label):
+        when, number = parts
+        return f"EIS measurement, {when} cycling, measurement {number} (EC-Lab MPR)"
+    return None
+
+
+def plot_description(label: str) -> str | None:
+    """Describe a plot (.png) output for the given label."""
+    if label in OUTPUT_PLOT_DESCRIPTIONS:
+        return OUTPUT_PLOT_DESCRIPTIONS[label]
+    if parts := _generic_eis_parts(label):
+        when, number = parts
+        return (
+            "Nyquist plot for electrochemical impedance spectroscopy (EIS) "
+            f"from {when} cycling, measurement {number}"
+        )
+    return None
+
+
+def data_description(label: str) -> str | None:
+    """Describe a data series (.parquet/.csv) output for the given label."""
+    if label in OUTPUT_DATA_DESCRIPTIONS:
+        return OUTPUT_DATA_DESCRIPTIONS[label]
+    if parts := _generic_eis_parts(label):
+        when, number = parts
+        return (
+            "Frequency-domain electrochemical impedance spectroscopy (EIS) data "
+            f"from {when} cycling, measurement {number}, using the battery data format (BDF)"
+        )
+    return None
 
 
 def get_res_from_filename(s: str) -> float:
@@ -452,7 +501,9 @@ def analyse_sample(
     cv_files_before = classified.get("cv_pre", [])
     cv_files_after = classified.get("cv_post", [])
     eis_by_tag = {
-        tag: classified[f"eis_{tag}"][0] for tag in EIS_TAGS if f"eis_{tag}" in classified
+        label.removeprefix("eis_"): paths[0]
+        for label, paths in classified.items()
+        if label.startswith("eis_")
     }
     mps_files = list(folder.glob("*.mps"))
     battinfo_files = list(folder.glob("*.xlsx"))
@@ -830,7 +881,7 @@ def analyse_sample(
                 snippet = battinfo.add_data(
                     _rel(path, root_folder),
                     zenodo_url,
-                    extras={"rdfs:comment": MPR_DESCRIPTIONS.get(label)},
+                    extras={"rdfs:comment": mpr_description(label)},
                     package=zenodo_package,
                     zip_filename=zenodo_zip_filename,
                 )
@@ -866,9 +917,9 @@ def analyse_sample(
             for path in label_paths:
                 rel = _rel(path, root_folder)
                 if path.suffix == ".png":
-                    comment = OUTPUT_PLOT_DESCRIPTIONS.get(label)
+                    comment = plot_description(label)
                 elif rel.endswith((".parquet", ".csv")):
-                    comment = OUTPUT_DATA_DESCRIPTIONS.get(label)
+                    comment = data_description(label)
                 else:
                     comment = OUTPUT_MISC_DESCRIPTIONS.get(label)
                 extras = {"rdfs:comment": comment} if comment else None

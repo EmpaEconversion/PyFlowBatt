@@ -10,11 +10,12 @@ from rocrate.rocrate import ROCrate
 
 from pyflowbatt.analysis import (
     EXTRA_INPUT_DESCRIPTIONS,
-    OUTPUT_DATA_DESCRIPTIONS,
     OUTPUT_MISC_DESCRIPTIONS,
-    OUTPUT_PLOT_DESCRIPTIONS,
+    _generic_eis_parts,
     _rel,
+    data_description,
     get_sampleid_from_folderpath,
+    plot_description,
 )
 from pyflowbatt.config import PyFlowBattConfig, classify_technique_files
 from pyflowbatt.version import __title__, __url__, __version__
@@ -31,6 +32,17 @@ MEASUREMENT_LABELS: dict[str, str] = {
     "eis_post-50%SOC": "Electrochemical Impedance Spectroscopy (post-cycling, 50% SOC)",
     "eis_post": "Electrochemical Impedance Spectroscopy (post-cycling, 0% SOC)",
 }
+
+
+def _measurement_technique(label: str) -> str:
+    """Technique name for a raw input label, including numbered EIS labels."""
+    if label in MEASUREMENT_LABELS:
+        return MEASUREMENT_LABELS[label]
+    if parts := _generic_eis_parts(label):
+        when, number = parts
+        return f"Electrochemical Impedance Spectroscopy ({when} cycling, measurement {number})"
+    return label
+
 
 LICENSE_URL = "https://creativecommons.org/licenses/by/4.0/"
 
@@ -50,9 +62,9 @@ def _output_description(label: str, path: Path) -> str | None:
     so a plot and its companion data file get distinct, consistent wording.
     """
     if path.suffix == ".png":
-        return OUTPUT_PLOT_DESCRIPTIONS.get(label)
+        return plot_description(label)
     if path.suffix in (".parquet", ".csv"):
-        return OUTPUT_DATA_DESCRIPTIONS.get(label)
+        return data_description(label)
     return OUTPUT_MISC_DESCRIPTIONS.get(label)
 
 
@@ -161,7 +173,7 @@ def write_rocrate(
                     properties={
                         "name": mpr_path.stem,
                         "encodingFormat": ENCODING_FORMATS[".mpr"],
-                        "measurementTechnique": MEASUREMENT_LABELS.get(label, label),
+                        "measurementTechnique": _measurement_technique(label),
                     },
                 )
                 label_entities.append(mpr_entity)
