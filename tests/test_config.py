@@ -486,6 +486,15 @@ def test_media_types_agree_between_crate_and_battinfo(
             assert battinfo_types[file_id] == crate_type, file_id
 
 
+def test_unwrap_len_1_list() -> None:
+    """Single-entity lists become plain values; empty and longer lists are untouched."""
+    from pyflowbatt.rocrate_output import _unwrap_len_1_list
+
+    assert _unwrap_len_1_list(["a"]) == "a"
+    assert _unwrap_len_1_list(["a", "b"]) == ["a", "b"]
+    assert _unwrap_len_1_list([]) is None
+
+
 def test_rocrate_describes_unmatched_raw_data(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
