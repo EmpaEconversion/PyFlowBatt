@@ -355,6 +355,176 @@ def test_sample_id_toml_battinfo_conflict_raises(tmp_path: Path) -> None:
         get_sampleid_from_folderpath(sample_dir, config, battinfo_name="different-battinfo-name")
 
 
+def _stub_battinfo(monkeypatch: pytest.MonkeyPatch, analysis_module: object) -> None:
+    """Make BattINFO conversion return a minimal cell, so metadata gets written."""
+
+    def fake_convert(_file: Path) -> dict:
+        return {
+            "@context": {},
+            "@type": "RedoxFlowBattery",
+            "schema:productID": "empa__fcid000001",
+            "schema:name": "stub-cell",
+        }
+
+    monkeypatch.setattr(analysis_module, "convert_excel_to_jsonld", fake_convert)
+
+
+def test_raw_inputs_cover_unanalysed_and_unmatched_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Raw files are all reported, whether their analysis failed or nothing matched them."""
+    from pyflowbatt import analysis as analysis_module
+
+    sample = _write_synthetic_sample(tmp_path / "sample")
+    (sample / "metadata.xlsx").write_text("x")
+    # Matches no technique pattern, so it is only picked up by the catch-all.
+    (sample / "sample_random_extra.mpr").write_text("x")
+    _stub_battinfo(monkeypatch, analysis_module)
+    config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
+
+    # The synthetic files aren't real EC-Lab data, so every technique fails to analyse.
+    _outputs, _extras, raw_inputs, _fcid, _sample_id = analysis_module.analyse_sample(
+        sample, save_format=None, config=config
+    )
+
+    # Only the largest GCPL is analysed, so the other cycling steps are unmatched too.
+    assert {p.name for p in raw_inputs[analysis_module.OTHER_RAW_LABEL]} == {
+        "sample_random_extra.mpr",
+        "sample_04_GCPL_A.mpr",
+        "sample_07_GCPL_C.mpr",
+    }
+    assert raw_inputs["gcpl"] == [sample / "sample_06_GCPL_B.mpr"]
+    assert raw_inputs["eis_pre"] == [sample / "sample_02_PEIS_A.mpr"]
+
+    metadata = json.loads((sample / "metadata.empa__fcid000001.json").read_text(encoding="utf-8"))
+    described = {d["@id"] for d in metadata["hasOutput"]["dcat:distribution"]}
+    assert "sample_random_extra.mpr" in described
+    assert "sample_02_PEIS_A.mpr" in described
+
+
+def test_unreadable_gcpl_and_cv_do_not_abort_the_sample(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A GCPL or CV file that can't be analysed is warned about, not raised."""
+    from pyflowbatt import analysis as analysis_module
+
+    sample = _write_synthetic_sample(tmp_path / "sample")
+    (sample / "metadata.xlsx").write_text("x")
+    _stub_battinfo(monkeypatch, analysis_module)
+    config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
+
+    outputs, _extras, raw_inputs, _fcid, _sample_id = analysis_module.analyse_sample(
+        sample, save_format=None, config=config
+    )
+
+    # Nothing could be analysed, but the raw files are still described.
+    assert "gcpl" not in outputs
+    assert "cv_pre" not in outputs
+    assert raw_inputs["cv_pre"] == [sample / "sample_CVApre_A.mpr"]
+
+
+def test_raw_description_names_the_format_only_for_mpr() -> None:
+    """ "(EC-Lab MPR)" is only appended to descriptions of actual .mpr files."""
+    from pyflowbatt import analysis as analysis_module
+
+    mpr = analysis_module.raw_description("lsv_pre", Path("cell_03_LSV_A.mpr"))
+    parquet = analysis_module.raw_description("lsv_pre", Path("cell_03_LSV_A.bdf.parquet"))
+    numbered = analysis_module.raw_description("eis_post_1", Path("cell_10_PEIS_A.csv"))
+
+    assert mpr == "Pre-cycling linear sweep voltammetry (EC-Lab MPR)"
+    assert parquet == "Pre-cycling linear sweep voltammetry"
+    assert numbered == "EIS measurement, after cycling, measurement 1"
+
+
+def test_media_types_agree_between_crate_and_battinfo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same file gets the same media type in the crate and the BattINFO JSON-LD."""
+    from pyflowbatt import analysis as analysis_module
+    from pyflowbatt.rocrate_output import write_rocrate
+
+    sample = _write_synthetic_sample(tmp_path / "sample")
+    (sample / "metadata.xlsx").write_text("x")
+    (sample / "sample_protocol.mps").write_text("EC-LAB SETTING FILE")
+    _stub_battinfo(monkeypatch, analysis_module)
+    config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
+    outputs, extras, raw_inputs, fcid, sample_id = analysis_module.analyse_sample(
+        sample, save_format=None, config=config, root_folder=tmp_path
+    )
+    write_rocrate(
+        tmp_path,
+        [sample],
+        {sample: outputs},
+        {sample: extras},
+        {sample: fcid},
+        {sample: config},
+        {sample: sample_id},
+        {sample: raw_inputs},
+    )
+
+    crate = json.loads((tmp_path / "ro-crate-metadata.json").read_text(encoding="utf-8"))
+    crate_types = {
+        e["@id"]: e["encodingFormat"] for e in crate["@graph"] if e.get("encodingFormat")
+    }
+    metadata_path = sample / "metadata.empa__fcid000001.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    battinfo_types = {
+        d["@id"]: d["dcat:mediaType"]
+        for section in ("hasOutput", "hasInput")
+        for d in metadata[section]["dcat:distribution"]
+        if d.get("dcat:mediaType")
+    }
+
+    assert crate_types["sample/sample_02_PEIS_A.mpr"] == "application/octet-stream"
+    assert crate_types["sample/sample_protocol.mps"] == "text/plain"
+    assert crate_types[f"sample/{metadata_path.name}"] == "application/ld+json"
+    # Raw .mpr files now carry a media type in the BattINFO JSON-LD too.
+    assert battinfo_types["sample/sample_02_PEIS_A.mpr"] == "application/octet-stream"
+    assert battinfo_types["sample/sample_protocol.mps"] == "text/plain"
+    for file_id, crate_type in crate_types.items():
+        if file_id in battinfo_types:
+            assert battinfo_types[file_id] == crate_type, file_id
+
+
+def test_rocrate_describes_unmatched_raw_data(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unmatched raw files reach the crate with a description and no measurementTechnique."""
+    from pyflowbatt import analysis as analysis_module
+    from pyflowbatt.rocrate_output import write_rocrate
+
+    sample = _write_synthetic_sample(tmp_path / "sample")
+    (sample / "metadata.xlsx").write_text("x")
+    (sample / "sample_random_extra.mpr").write_text("x")
+    _stub_battinfo(monkeypatch, analysis_module)
+    config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
+    outputs, extras, raw_inputs, fcid, sample_id = analysis_module.analyse_sample(
+        sample, save_format=None, config=config, root_folder=tmp_path
+    )
+
+    write_rocrate(
+        tmp_path,
+        [sample],
+        {sample: outputs},
+        {sample: extras},
+        {sample: fcid},
+        {sample: config},
+        {sample: sample_id},
+        {sample: raw_inputs},
+    )
+
+    crate = json.loads((tmp_path / "ro-crate-metadata.json").read_text(encoding="utf-8"))
+    entities = {e["@id"]: e for e in crate["@graph"]}
+    unmatched = entities["sample/sample_random_extra.mpr"]
+    assert "measurementTechnique" not in unmatched
+    assert unmatched["description"] == f"{analysis_module.OTHER_RAW_DESCRIPTION} (EC-Lab MPR)"
+    # A file whose analysis failed keeps its technique and is still described.
+    assert (
+        "Electrochemical Impedance"
+        in entities["sample/sample_02_PEIS_A.mpr"]["measurementTechnique"]
+    )
+
+
 def test_analyse_sample_uses_battinfo_fcid_without_toml(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -377,7 +547,7 @@ def test_analyse_sample_uses_battinfo_fcid_without_toml(
     monkeypatch.setattr(analysis_module, "convert_excel_to_jsonld", fake_convert)
 
     config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
-    _tracked_outputs, _tracked_extra_inputs, fcid, sample_id = analysis_module.analyse_sample(
+    _outputs, _extra_inputs, _raw_inputs, fcid, sample_id = analysis_module.analyse_sample(
         sample, save_format=None, config=config
     )
     assert sample_id == "battinfo-derived-name"
@@ -407,7 +577,7 @@ def test_analyse_sample_uses_battinfo_name_without_toml_fcid(
     monkeypatch.setattr(analysis_module, "convert_excel_to_jsonld", fake_convert)
 
     config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
-    _tracked_outputs, _tracked_extra_inputs, fcid, sample_id = analysis_module.analyse_sample(
+    _outputs, _extra_inputs, _raw_inputs, fcid, sample_id = analysis_module.analyse_sample(
         sample, save_format=None, config=config
     )
     assert sample_id == "battinfo-derived-name"
@@ -531,7 +701,7 @@ def test_analyse_sample_records_pub_info_xlsx_as_input(
     monkeypatch.setattr(analysis_module, "convert_excel_to_jsonld", _fake_convert)
 
     config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
-    _outputs, extra_inputs, _fcid, _sample_id = analysis_module.analyse_sample(
+    _outputs, extra_inputs, _raw_inputs, _fcid, _sample_id = analysis_module.analyse_sample(
         sample,
         save_format=None,
         config=config,

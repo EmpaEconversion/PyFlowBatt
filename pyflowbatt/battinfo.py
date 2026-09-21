@@ -12,6 +12,7 @@ from urllib.parse import quote
 
 import pandas as pd
 
+from pyflowbatt.media_types import media_type
 from pyflowbatt.version import __title__, __url__, __version__
 
 logger = logging.getLogger(__name__)
@@ -551,20 +552,10 @@ def add_input_data(
         dict with "BatteryTest" as top level type.
 
     """
-    ext = Path(rel_file_path).suffix.lower()
-    if ext in {".mpr", ".mps"}:
-        media_type = "application/octet-stream"
-    elif ext in {".xlsx", ".xls"}:
-        media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    elif ext == ".json":
-        media_type = "application/json"
-    else:
-        media_type = "application/octet-stream"
-
     dist: dict = {
         "@id": quote(rel_file_path),
         "@type": "dcat:Distribution",
-        "dcat:mediaType": media_type,
+        "dcat:mediaType": media_type(rel_file_path),
     }
     download_url = zenodo_download_url(
         rel_file_path, zenodo_doi_url, package=package, zip_filename=zip_filename
@@ -608,7 +599,6 @@ def add_data(
     extras = extras or {}
     if rel_file_path.endswith(".parquet"):
         additions: dict[str, str | list | dict] = {
-            "dcat:mediaType": "application/vnd.apache.parquet",
             "csvw:tableSchema": "https://w3id.org/battery-data-alliance/ontology/battery-data-format/schema",
             "rdfs:comment": "Time series electrochemical data using Battery Data Format (bdf) columns",
         }
@@ -618,7 +608,6 @@ def add_data(
             )
     elif rel_file_path.endswith(".csv"):
         additions = {
-            "dcat:mediaType": "text/csv",
             "csvw:tableSchema": "https://w3id.org/battery-data-alliance/ontology/battery-data-format/schema",
             "csvw:dialect": {"@type": "csvw:Dialect", "csvw:delimiter": ",", "csvw:skipRows": 0},
             "rdfs:comment": "Time series electrochemical data using Battery Data Format (bdf) columns",
@@ -627,17 +616,10 @@ def add_data(
             additions["rdfs:comment"] = (
                 "Frequency-domain electrochemical data using Battery Data Format (bdf) columns"
             )
-    elif rel_file_path.endswith(".json"):
-        additions = {
-            "dcat:mediaType": "application/json",
-        }
-    elif rel_file_path.endswith(".png"):
-        additions = {
-            "dcat:mediaType": "image/png",
-        }
+    elif rel_file_path.endswith((".json", ".png")):
+        additions = {}
     elif rel_file_path.endswith(".xlsx"):
         additions = {
-            "dcat:mediaType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             "rdfs:comment": "Excel sheets with summary information from sample analysis",
         }
     elif rel_file_path.endswith(".mpr"):
@@ -648,12 +630,13 @@ def add_data(
     elif rel_file_path.endswith(".mps"):
         additions = {"rdfs:comment": "Cycling protocol in text-based Biologic .mps format"}
     else:
-        msg = f"Unknown file type: {rel_file_path}"
-        raise ValueError(msg)
+        # Any other raw data file that happens to sit in the sample folder.
+        additions = {"@type": ["dcat:Distribution", "RawData"]}
 
     dist: dict = {
         "@id": quote(rel_file_path),
         "@type": "dcat:Distribution",
+        "dcat:mediaType": media_type(rel_file_path),
         **additions,
         **extras,
     }

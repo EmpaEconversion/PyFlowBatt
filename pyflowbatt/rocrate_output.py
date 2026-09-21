@@ -10,14 +10,17 @@ from rocrate.rocrate import ROCrate
 
 from pyflowbatt.analysis import (
     EXTRA_INPUT_DESCRIPTIONS,
+    OTHER_RAW_LABEL,
     OUTPUT_MISC_DESCRIPTIONS,
     _generic_eis_parts,
     _rel,
     data_description,
     get_sampleid_from_folderpath,
     plot_description,
+    raw_description,
 )
 from pyflowbatt.config import PyFlowBattConfig, classify_technique_files
+from pyflowbatt.media_types import media_type
 from pyflowbatt.version import __title__, __url__, __version__
 
 MEASUREMENT_LABELS: dict[str, str] = {
@@ -45,14 +48,6 @@ def _measurement_technique(label: str) -> str:
 
 
 LICENSE_URL = "https://creativecommons.org/licenses/by/4.0/"
-
-ENCODING_FORMATS: dict[str, str] = {
-    ".parquet": "application/x-parquet",
-    ".csv": "text/csv",
-    ".png": "image/png",
-    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    ".mpr": "application/octet-stream",
-}
 
 
 def _output_description(label: str, path: Path) -> str | None:
@@ -130,8 +125,14 @@ def write_rocrate(
     fcids_by_sample_folder: dict[Path, str | None] | None = None,
     configs_by_sample_folder: dict[Path, PyFlowBattConfig] | None = None,
     sample_ids_by_sample_folder: dict[Path, str] | None = None,
+    raw_inputs_by_sample_folder: dict[Path, dict[str, list[Path]]] | None = None,
 ) -> None:
-    """Write ro-crate-metadata.json at root_folder describing all inputs and outputs."""
+    """Write ro-crate-metadata.json at root_folder describing all inputs and outputs.
+
+    `raw_inputs_by_sample_folder` is what `analyse_sample` found, so the crate and the
+    BattINFO JSON-LD describe the same files. Without it the folders are re-classified,
+    which finds the same technique files but no unmatched raw data.
+    """
     crate = ROCrate()
     crate.root_dataset["name"] = root_folder.name
     crate.root_dataset["description"] = (
@@ -160,28 +161,35 @@ def write_rocrate(
         all_sample_datasets.append(sample_dataset)
         sample_file_entities = []
 
-        inputs = _classify_inputs(sample_folder, config)
+        inputs = (raw_inputs_by_sample_folder or {}).get(sample_folder) or _classify_inputs(
+            sample_folder, config
+        )
         input_entities: dict[str, list] = {}
-        for label, mpr_paths in inputs.items():
+        for label, raw_paths in inputs.items():
             label_entities = []
-            for mpr_path in mpr_paths:
-                if not mpr_path.exists():
+            for raw_path in raw_paths:
+                if not raw_path.exists():
                     continue
-                mpr_entity = crate.add_file(
-                    str(mpr_path),
-                    dest_path=_rel(mpr_path, root_folder),
-                    properties={
-                        "name": mpr_path.stem,
-                        "encodingFormat": ENCODING_FORMATS[".mpr"],
-                        "measurementTechnique": _measurement_technique(label),
-                    },
+                raw_props: dict = {
+                    "name": raw_path.stem,
+                    "encodingFormat": media_type(raw_path),
+                }
+                if label == OTHER_RAW_LABEL:
+                    raw_props["description"] = raw_description(label, raw_path)
+                else:
+                    raw_props["measurementTechnique"] = _measurement_technique(label)
+                raw_entity = crate.add_file(
+                    str(raw_path), dest_path=_rel(raw_path, root_folder), properties=raw_props
                 )
-                label_entities.append(mpr_entity)
-                sample_file_entities.append(mpr_entity)
+                label_entities.append(raw_entity)
+                sample_file_entities.append(raw_entity)
             if label_entities:
                 input_entities[label] = label_entities
 
-        all_input_entities = [e for ents in input_entities.values() for e in ents]
+        # Unmatched raw files weren't analysed, so nothing derives from them.
+        all_input_entities = [
+            e for label, ents in input_entities.items() if label != OTHER_RAW_LABEL for e in ents
+        ]
 
         extras = (
             tracked_extras_by_sample_folder.get(sample_folder, {})
@@ -200,9 +208,7 @@ def write_rocrate(
                     dest_path=_rel(path, root_folder),
                     properties={
                         "name": path.name,
-                        "encodingFormat": ENCODING_FORMATS.get(
-                            path.suffix, "application/octet-stream"
-                        ),
+                        "encodingFormat": media_type(path),
                         "description": desc,
                     },
                 )
@@ -226,13 +232,9 @@ def write_rocrate(
             for path in paths:
                 if not path.exists():
                     continue
-                ext = "".join(path.suffixes)
-                fmt = ENCODING_FORMATS.get(
-                    path.suffix, ENCODING_FORMATS.get(ext, "application/octet-stream")
-                )
                 props: dict = {
                     "name": path.name,
-                    "encodingFormat": fmt,
+                    "encodingFormat": media_type(path),
                     "wasDerivedFrom": derived_from,
                 }
                 desc = _output_description(label, path)
@@ -252,7 +254,7 @@ def write_rocrate(
             dest_path="combined_summary.xlsx",
             properties={
                 "name": "combined_summary.xlsx",
-                "encodingFormat": ENCODING_FORMATS[".xlsx"],
+                "encodingFormat": media_type(combined_summary),
                 "wasDerivedFrom": all_sample_datasets or None,
                 "description": "Combined per-sample summary across all cells",
             },

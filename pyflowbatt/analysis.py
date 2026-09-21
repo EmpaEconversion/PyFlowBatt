@@ -24,20 +24,20 @@ SAVE_FORMATS = Literal["parquet", "csv"] | None
 DEFAULT_DEPTH = 6  # Default max search depth in folders
 DEFAULT_SEARCH = 10000  # Default max number of folders searched
 
-MPR_DESCRIPTIONS: dict[str, str] = {
-    "gcpl": "Galvanostatic cycling with potential limitation measurement (EC-Lab MPR)",
-    "ocv": "Open circuit voltage measurement (EC-Lab MPR)",
-    "lsv_pre": "Pre-cycling linear sweep voltammetry (EC-Lab MPR)",
-    "lsv_post": "Post-cycling linear sweep voltammetry (EC-Lab MPR)",
-    "cv_pre": "Pre-cycling cyclic voltammetry (EC-Lab MPR)",
-    "cv_post": "Post-cycling cyclic voltammetry (EC-Lab MPR)",
-    "eis_pre": "EIS measurement, pre-cycling (EC-Lab MPR)",
-    "eis_pre-50%SOC": "EIS measurement, pre-cycling 50% SOC (EC-Lab MPR)",
-    "eis_post-50%SOC": "EIS measurement, post-cycling 50% SOC (EC-Lab MPR)",
-    "eis_post": "EIS measurement, post-cycling (EC-Lab MPR)",
+RAW_INPUT_DESCRIPTIONS: dict[str, str] = {
+    "gcpl": "Galvanostatic cycling with potential limitation measurement",
+    "ocv": "Open circuit voltage measurement",
+    "lsv_pre": "Pre-cycling linear sweep voltammetry",
+    "lsv_post": "Post-cycling linear sweep voltammetry",
+    "cv_pre": "Pre-cycling cyclic voltammetry",
+    "cv_post": "Post-cycling cyclic voltammetry",
+    "eis_pre": "EIS measurement, pre-cycling",
+    "eis_pre-50%SOC": "EIS measurement, pre-cycling 50% SOC",
+    "eis_post-50%SOC": "EIS measurement, post-cycling 50% SOC",
+    "eis_post": "EIS measurement, post-cycling",
 }
 
-# Descriptions for the plot (.png) tracked outputs, keyed by the same labels as MPR_DESCRIPTIONS.
+# Descriptions for the plot (.png) tracked outputs, keyed by the same labels as the inputs.
 OUTPUT_PLOT_DESCRIPTIONS: dict[str, str] = {
     "gcpl": (
         "Plots of voltage vs. time, "
@@ -125,6 +125,10 @@ EXTRA_INPUT_DESCRIPTIONS: dict[str, str] = {
     "pub_info": "Publication and Zenodo deposition Excel metadata input",
 }
 
+# Label for raw data files in a sample folder that no technique pattern matched.
+OTHER_RAW_LABEL = "other_raw"
+OTHER_RAW_DESCRIPTION = "Raw electrochemical data file, not used in the analysis"
+
 # Numbered EIS labels, used when a folder's EIS layout doesn't match a known protocol.
 # They carry no state of charge, so their descriptions only say which side of cycling
 # the measurement came from.
@@ -139,14 +143,20 @@ def _generic_eis_parts(label: str) -> tuple[str, str] | None:
     return ("before" if match.group(1) == "pre" else "after", match.group(2))
 
 
-def mpr_description(label: str) -> str | None:
-    """Describe a raw .mpr input for the given label."""
-    if label in MPR_DESCRIPTIONS:
-        return MPR_DESCRIPTIONS[label]
-    if parts := _generic_eis_parts(label):
+def raw_description(label: str, path: Path) -> str | None:
+    """Describe a raw input file, naming the format only where we know what it is."""
+    if label in RAW_INPUT_DESCRIPTIONS:
+        description = RAW_INPUT_DESCRIPTIONS[label]
+    elif label == OTHER_RAW_LABEL:
+        description = OTHER_RAW_DESCRIPTION
+    elif parts := _generic_eis_parts(label):
         when, number = parts
-        return f"EIS measurement, {when} cycling, measurement {number} (EC-Lab MPR)"
-    return None
+        description = f"EIS measurement, {when} cycling, measurement {number}"
+    else:
+        return None
+    if path.suffix.lower() == ".mpr":
+        return f"{description} (EC-Lab MPR)"
+    return description
 
 
 def plot_description(label: str) -> str | None:
@@ -461,8 +471,12 @@ def analyse_sample(
     config: PyFlowBattConfig | None = None,
     root_folder: str | Path | None = None,
     zenodo_package: Literal["zip", "files"] = "files",
-) -> tuple[dict[str, list[Path]], dict[str, list[Path]], str | None, str]:
+) -> tuple[dict[str, list[Path]], dict[str, list[Path]], dict[str, list[Path]], str | None, str]:
     """Read all the files in a folder, analayse and plot everything.
+
+    Returns the tracked outputs, the extra inputs (protocol and metadata files), every
+    raw data file found (keyed by technique label, with unmatched files under
+    ``OTHER_RAW_LABEL``), the FCID and the sample ID.
 
     Without an explicit config, loads a ``pyflowbatt.toml`` cascade (home directory,
     parent folder, sample folder) to customise technique glob patterns and sample ID
@@ -608,23 +622,27 @@ def analyse_sample(
             df = read_to_bdf(ocv_files[0])
             av_ocv = ocv.analyse(df)
             tracked_mpr_inputs["ocv"] = [ocv_files[0]]
-        except ValueError:
+        except Exception:
             logger.exception("Failed to analyse OCV")
 
     logger.info("🔋 Analysing GCPL")
     if gcpl_file is None:
         logger.warning("- ☹️ No GCPL files found, skipping")
     else:
-        df, cycle_df = gcpl.analyse(read_to_bdf(gcpl_file))
-        fig, _ax = gcpl.plot(df, cycle_df)
-        fig.savefig(results_dir / "gcpl.png")
-        plt.close(fig)
-        ratetest_df = gcpl.cycles_to_ratetest(cycle_df)
-        df_save_bdf(df, results_dir / "gcpl.x", save_format=save_format)
-        tracked_outputs["gcpl"] = [results_dir / "gcpl.png"]
-        if bdf_suffix:
-            tracked_outputs["gcpl"].append((results_dir / "gcpl.x").with_suffix(bdf_suffix))
-        tracked_mpr_inputs["gcpl"] = [gcpl_file]
+        try:
+            df, cycle_df = gcpl.analyse(read_to_bdf(gcpl_file))
+            fig, _ax = gcpl.plot(df, cycle_df)
+            fig.savefig(results_dir / "gcpl.png")
+            plt.close(fig)
+            ratetest_df = gcpl.cycles_to_ratetest(cycle_df)
+            df_save_bdf(df, results_dir / "gcpl.x", save_format=save_format)
+            tracked_outputs["gcpl"] = [results_dir / "gcpl.png"]
+            if bdf_suffix:
+                tracked_outputs["gcpl"].append((results_dir / "gcpl.x").with_suffix(bdf_suffix))
+            tracked_mpr_inputs["gcpl"] = [gcpl_file]
+        except Exception as e:
+            cycle_df = None
+            logger.warning("- Failed to analyse %s: %s", gcpl_file.stem, str(e))
 
     logger.info("↗️ Analysing LSV")
     lsv_res = {"pre": np.nan, "post": np.nan}
@@ -656,7 +674,7 @@ def analyse_sample(
                     )
                 tracked_mpr_inputs[f"lsv_{p}"] = [lsv_files_p[0]]
                 lsv_rows.append({"Pre or post cycle": p, **results})
-            except ValueError:
+            except Exception:
                 logger.exception("Failed to analyse LSV file")
         if lsv_rows:
             lsv_df = pd.DataFrame(lsv_rows)
@@ -669,26 +687,29 @@ def analyse_sample(
         for p, cv_files in [("pre", cv_files_before), ("post", cv_files_after)]:
             if not cv_files:
                 continue
-            df, cv_df, capacitance_mF = cv.analyse(
-                read_to_bdf(cv_files[0]),
-                v_min=config.cv_v_min,
-                v_max=config.cv_v_max,
-                v_med=config.cv_v_med,
-                v_range=config.cv_v_range,
-                min_r2=config.cv_min_r2,
-            )
-            df_save_bdf(df, results_dir / f"cv_{p}.x", save_format=save_format)
-            fig, _ax = cv.plot(df, cv_df, min_r2=config.cv_min_r2)
-            fig.savefig(results_dir / f"cv_{p}.png")
-            plt.close(fig)
-            if capacitance_mF:
-                cv_res[p] = capacitance_mF
-            tracked_outputs[f"cv_{p}"] = [results_dir / f"cv_{p}.png"]
-            if bdf_suffix:
-                tracked_outputs[f"cv_{p}"].append(
-                    (results_dir / f"cv_{p}.x").with_suffix(bdf_suffix)
+            try:
+                df, cv_df, capacitance_mF = cv.analyse(
+                    read_to_bdf(cv_files[0]),
+                    v_min=config.cv_v_min,
+                    v_max=config.cv_v_max,
+                    v_med=config.cv_v_med,
+                    v_range=config.cv_v_range,
+                    min_r2=config.cv_min_r2,
                 )
-            tracked_mpr_inputs[f"cv_{p}"] = [cv_files[0]]
+                df_save_bdf(df, results_dir / f"cv_{p}.x", save_format=save_format)
+                fig, _ax = cv.plot(df, cv_df, min_r2=config.cv_min_r2)
+                fig.savefig(results_dir / f"cv_{p}.png")
+                plt.close(fig)
+                if capacitance_mF:
+                    cv_res[p] = capacitance_mF
+                tracked_outputs[f"cv_{p}"] = [results_dir / f"cv_{p}.png"]
+                if bdf_suffix:
+                    tracked_outputs[f"cv_{p}"].append(
+                        (results_dir / f"cv_{p}.x").with_suffix(bdf_suffix)
+                    )
+                tracked_mpr_inputs[f"cv_{p}"] = [cv_files[0]]
+            except Exception as e:
+                logger.warning("- Failed to analyse %s: %s", cv_files[0].stem, str(e))
 
     logger.info("🌈 Analysing PEIS")
     eis_res = {}
@@ -865,6 +886,20 @@ def analyse_sample(
     workbook.close()
     tracked_outputs["summary"] = [results_dir / "summary.xlsx"]
 
+    # Every raw file in the folder, whether or not its analysis produced anything, so the
+    # metadata describes the data that ships rather than only what could be analysed.
+    raw_inputs: dict[str, list[Path]] = {label: list(paths) for label, paths in classified.items()}
+    classified_files = {path for paths in classified.values() for path in paths}
+    other_raw = [
+        path
+        for ext in config.extensions
+        for path in sorted(folder.glob(f"*{ext}"))
+        if path not in classified_files
+    ]
+    if other_raw:
+        logger.info("- Found %d raw data file(s) not matching any technique", len(other_raw))
+        raw_inputs[OTHER_RAW_LABEL] = other_raw
+
     tracked_extra_inputs: dict[str, list[Path]] = {}
     if mps_files:
         tracked_extra_inputs["protocol"] = mps_files
@@ -876,12 +911,12 @@ def analyse_sample(
     if battinfo_json is not None:
         zenodo_url = pub_info.get("zenodo_doi_url") if pub_info else None
         zenodo_zip_filename = pub_info.get("zenodo_zip_filename") or f"{root_folder.name}.zip"
-        for label, paths in tracked_mpr_inputs.items():
+        for label, paths in raw_inputs.items():
             for path in paths:
                 snippet = battinfo.add_data(
                     _rel(path, root_folder),
                     zenodo_url,
-                    extras={"rdfs:comment": mpr_description(label)},
+                    extras={"rdfs:comment": raw_description(label, path)},
                     package=zenodo_package,
                     zip_filename=zenodo_zip_filename,
                 )
@@ -923,21 +958,20 @@ def analyse_sample(
                 else:
                     comment = OUTPUT_MISC_DESCRIPTIONS.get(label)
                 extras = {"rdfs:comment": comment} if comment else None
-                with contextlib.suppress(ValueError):
-                    snippet = battinfo.add_data(
-                        rel,
-                        zenodo_url,
-                        extras=extras,
-                        package=zenodo_package,
-                        zip_filename=zenodo_zip_filename,
-                    )
-                    battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
+                snippet = battinfo.add_data(
+                    rel,
+                    zenodo_url,
+                    extras=extras,
+                    package=zenodo_package,
+                    zip_filename=zenodo_zip_filename,
+                )
+                battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
         metadata_path = folder / f"metadata.{fcid or sample_id}.json"
         with metadata_path.open("w", encoding="utf-8") as mf:
             json.dump(battinfo_json, mf, indent=4, ensure_ascii=False)
         tracked_outputs["metadata"] = [metadata_path]
 
-    return tracked_outputs, tracked_extra_inputs, fcid, sample_id
+    return tracked_outputs, tracked_extra_inputs, raw_inputs, fcid, sample_id
 
 
 def is_sample_folder(folderpath: str | Path, config: PyFlowBattConfig | None = None) -> bool:
@@ -1087,6 +1121,7 @@ def analyse_all_samples(
     }
     tracked_by_sample_folder: dict[Path, dict[str, list[Path]]] = {}
     tracked_extras_by_sample_folder: dict[Path, dict[str, list[Path]]] = {}
+    raw_inputs_by_sample_folder: dict[Path, dict[str, list[Path]]] = {}
     fcids_by_sample_folder: dict[Path, str | None] = {}
     sample_ids_by_sample_folder: dict[Path, str] = {}
     if len(sample_folders) > 1:
@@ -1095,6 +1130,7 @@ def analyse_all_samples(
         (
             tracked_by_sample_folder[sample_folder],
             tracked_extras_by_sample_folder[sample_folder],
+            raw_inputs_by_sample_folder[sample_folder],
             fcids_by_sample_folder[sample_folder],
             sample_ids_by_sample_folder[sample_folder],
         ) = analyse_sample(
@@ -1130,6 +1166,7 @@ def analyse_all_samples(
         fcids_by_sample_folder,
         configs_by_sample_folder,
         sample_ids_by_sample_folder,
+        raw_inputs_by_sample_folder,
     )
     logger.info("📦 Written RO-Crate metadata to %s", folder / "ro-crate-metadata.json")
 
