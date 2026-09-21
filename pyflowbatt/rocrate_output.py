@@ -50,6 +50,13 @@ def _measurement_technique(label: str) -> str:
 LICENSE_URL = "https://creativecommons.org/licenses/by/4.0/"
 
 
+def _unwrap_len_1_list(entities: list) -> object | None:
+    """Unwrap a one element list."""
+    if not entities:
+        return None
+    return entities[0] if len(entities) == 1 else entities
+
+
 def _output_description(label: str, path: Path) -> str | None:
     """Pick the description for a tracked output, by label and file type.
 
@@ -222,13 +229,17 @@ def write_rocrate(
 
         for label, paths in tracked_by_sample_folder.get(sample_folder, {}).items():
             if label == "metadata":
-                derived_from = [
-                    ent
-                    for extra_label in ("battinfo_xlsx", "pub_info")
-                    for ent in extra_entities.get(extra_label, [])
-                ] or None
+                derived_from = _unwrap_len_1_list(
+                    [
+                        ent
+                        for extra_label in ("battinfo_xlsx", "pub_info")
+                        for ent in extra_entities.get(extra_label, [])
+                    ]
+                )
             else:
-                derived_from = input_entities.get(label) or all_input_entities or None
+                derived_from = _unwrap_len_1_list(
+                    input_entities.get(label) or all_input_entities or []
+                )
             for path in paths:
                 if not path.exists():
                     continue
@@ -255,7 +266,7 @@ def write_rocrate(
             properties={
                 "name": "combined_summary.xlsx",
                 "encodingFormat": media_type(combined_summary),
-                "wasDerivedFrom": all_sample_datasets or None,
+                "wasDerivedFrom": _unwrap_len_1_list(all_sample_datasets),
                 "description": "Combined per-sample summary across all cells",
             },
         )
