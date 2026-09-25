@@ -26,7 +26,7 @@ def read_to_bdf(file: str | Path) -> pd.DataFrame:
         if "half cycle" in df.columns:  # It is cycling data
             # Have to do some duct taping
             # EC-labs 'cycles' and 'Q charge or discharge' are sometimes wrong
-            df["dumb cycle"] = (df["ox or red"].diff() > 0).cumsum()
+            df["dumb cycle"] = (df["ox or red"].astype(int).diff() > 0).cumsum()
             df["cycle number"] = 0
             cycle = 1
             for _group, group_df in df.groupby("dumb cycle"):
@@ -42,7 +42,7 @@ def read_to_bdf(file: str | Path) -> pd.DataFrame:
                     cycle += 1
 
         if "Ns changes" in df.columns:
-            df["step number"] = 1 + df["Ns changes"].cumsum()
+            df["step number"] = 1 + df["Ns changes"].astype(int).cumsum()
 
         return _mpr_df_to_bdf(df)
     import bdf  # noqa: PLC0415
