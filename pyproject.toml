@@ -17,7 +17,7 @@ dependencies = [
     "pyarrow>=21.0.0",
     "xlsxwriter>=3.2.9",
     "rocrate>=0.9",
-    "yadg>=6.2.2,<7.0.0",
+    "yadg>=7.0.1,<8.0.0",
     "tomli>=2.0.0; python_version < '3.11'",
 ]
 

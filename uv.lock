@@ -404,7 +404,7 @@ wheels = [
 
 [[package]]
 name = "dgbowl-schemas"
-version = "124"
+version = "126"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "babel" },
@@ -414,9 +414,9 @@ dependencies = [
     { name = "pyyaml" },
     { name = "tzlocal" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/44/1a/fbeda96947532b1437ca08ac3dcd9c07499c989eae97e9e4a2b8e9bdf441/dgbowl_schemas-124.tar.gz", hash = "sha256:a453fcf165b49d41cc73a6669453d35a7ab425e06bff8316df338f1f85fc0bcf", size = 26645, upload-time = "2025-06-07T13:51:45.187Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/52/c7/8cefea7c98a0c55d49394d29d2d3223afa4d719c14fdcd42071f689a000c/dgbowl_schemas-126.tar.gz", hash = "sha256:c2630a2e7af972c52178a1c4d3ab5f9a2bc87d69473c11ac4edb7fa855ab53dc", size = 29183, upload-time = "2026-07-17T09:03:35.57Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/1c/eb/22bcdccbb50cc85567e05571d91a5f63e5706e03910a98980b15947f73bf/dgbowl_schemas-124-py3-none-any.whl", hash = "sha256:ff4b9df5e774cc075d6c526fb4b077ee9df8802f85b6fdec4d49429ac9dd9adf", size = 61716, upload-time = "2025-06-07T13:51:43.47Z" },
+    { url = "https://files.pythonhosted.org/packages/c9/df/aa06efdfe6ad255490b07c9892a6d6648ab63d2562e3881aa284458375ff/dgbowl_schemas-126-py3-none-any.whl", hash = "sha256:f997d6bdabb8a8dd78c6aa9649d54f616a6a0e483b33160257bf6ca19db71b4e", size = 74666, upload-time = "2026-07-17T09:03:34.28Z" },
 ]
 
 [[package]]
@@ -577,15 +577,21 @@ wheels = [
 
 [[package]]
 name = "h5netcdf"
-version = "1.6.4"
+version = "1.8.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "h5py" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "packaging" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/5a/a1/e3ca842fd0895fcfb21c754a18fd8cd7362d1625b3a93408c982c38f4ec1/h5netcdf-1.6.4.tar.gz", hash = "sha256:83db7e5eb9b822bed2c79050d6cf8f36ecbd1039f4252bd90fab200edcaaf67d", size = 65832, upload-time = "2025-08-05T06:26:56.707Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ef/03/92d6cc02c0055158167255980461155d6e17f1c4143c03f8bcc18d3e3f3a/h5netcdf-1.8.1.tar.gz", hash = "sha256:9b396a4cc346050fc1a4df8523bc1853681ec3544e0449027ae397cb953c7a16", size = 78679, upload-time = "2026-01-23T07:35:31.233Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/5b/f5/ac71e692aad076d50a0f5f073204346d5f5577daffd21bb4b72c485f8959/h5netcdf-1.6.4-py3-none-any.whl", hash = "sha256:e0018e6a918f2bef2a4aa7b470a952b8a0b5d16a5893d59bea56524cc6207fcf", size = 50683, upload-time = "2025-08-05T06:26:55.644Z" },
+    { url = "https://files.pythonhosted.org/packages/b1/8b/88f16936a8e8070a83d36239555227ecd91728f9ef222c5382cda07e0fd6/h5netcdf-1.8.1-py3-none-any.whl", hash = "sha256:a76ed7cfc9b8a8908ea7057c4e57e27307acff1049b7f5ed52db6c2247636879", size = 62915, upload-time = "2026-01-23T07:35:30.195Z" },
+]
+
+[package.optional-dependencies]
+h5py = [
+    { name = "h5py" },
 ]
 
 [[package]]
@@ -1637,7 +1643,7 @@ requires-dist = [
     { name = "rocrate", specifier = ">=0.9" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0.0" },
     { name = "xlsxwriter", specifier = ">=3.2.9" },
-    { name = "yadg", specifier = ">=6.2.2,<7.0.0" },
+    { name = "yadg", specifier = ">=7.0.1,<8.0.0" },
 ]
 
 [package.metadata.requires-dev]
@@ -2268,12 +2274,12 @@ wheels = [
 
 [[package]]
 name = "yadg"
-version = "6.2.2"
+version = "7.0.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "babel" },
     { name = "dgbowl-schemas" },
-    { name = "h5netcdf" },
+    { name = "h5netcdf", extra = ["h5py"] },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "olefile" },
@@ -2290,7 +2296,7 @@ dependencies = [
     { name = "xarray", version = "2025.6.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "xarray", version = "2025.9.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/94/66/ed61cc4ffad502919fff7adec80ceb9ea408a59365ed5df7c98a89a7dcaf/yadg-6.2.2.tar.gz", hash = "sha256:23a25163fe9d8994b75d302102e44beae571c20ace62258431cd6a8e60bc3b94", size = 96568, upload-time = "2025-10-01T18:09:09.988Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/7b/ef/fedd625c671adb4e77394beb85dc239d7f8b82e9c06ef22d2e3e94b3648e/yadg-7.0.1.tar.gz", hash = "sha256:61049f4ca7f5f9a444e022a17cad2697d6a4fe8a7eb97420b3f1ad6b695e2ea3", size = 95777, upload-time = "2026-08-14T17:37:20.195Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f3/7f/d370b0b6a61d357fb49520b8ac8803bf0a871f9124ea07257258d8a7abe5/yadg-6.2.2-py3-none-any.whl", hash = "sha256:d319942fea0c43331a3a30e2e99f4874962ebd60ce166253bdeaa4a8931012c0", size = 113952, upload-time = "2025-10-01T18:09:08.62Z" },
+    { url = "https://files.pythonhosted.org/packages/82/04/00acd479b1fee4fd2e32d7a1762844fa05e90ed0b9ddc84f393e3f952a95/yadg-7.0.1-py3-none-any.whl", hash = "sha256:fd568408f445de464ccba261cbcf0f167634f668da84170cf5e4a6eeb5073d7b", size = 114419, upload-time = "2026-08-14T17:37:18.782Z" },
 ]
