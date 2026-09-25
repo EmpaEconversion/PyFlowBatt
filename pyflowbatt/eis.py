@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.axes import Axes
+from matplotlib.collections import LineCollection
 from matplotlib.figure import Figure
 
 
@@ -36,8 +37,15 @@ def plot(df: pd.DataFrame, Z_fit: np.ndarray) -> tuple[Figure, Axes]:
     """Nyquist plot fit result."""
     Z = df["Real Impedance / ohm"] + 1j * df["Imaginary Impedance / ohm"]
     fig, ax = plt.subplots()
-    ax.plot(np.real(Z), -np.imag(Z), "o", label="Data")
-    ax.plot(np.real(Z_fit), -np.imag(Z_fit), "-", label="Fit")
+    # Residual segments from each data point to its fitted point
+    data_pts = np.column_stack([np.real(Z), -np.imag(Z)])
+    fit_pts = np.column_stack([np.real(Z_fit), -np.imag(Z_fit)])
+    segments = list(zip(data_pts, fit_pts, strict=True))
+    ax.plot(np.real(Z), -np.imag(Z), "k.-", label="Data")
+    ax.plot(np.real(Z_fit), -np.imag(Z_fit), "C0.-", label="Fit")
+    ax.add_collection(
+        LineCollection(segments, colors="grey", linewidths=0.8, label="Residual", zorder=1)
+    )
     ax.legend()
     ax.set_xlabel("Real Impedance / ohm")
     ax.set_ylabel("Imaginary Impedance / ohm")
