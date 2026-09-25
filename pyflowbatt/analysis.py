@@ -747,7 +747,16 @@ def analyse_sample(
             ]
             order = [
                 f"{elem}_{x}"
-                for elem in ["L0", "R0", "R1", "CPE1_0", "CPE1_1", "R2", "CPE2_0", "CPE2_1"]
+                for elem in [
+                    "L0.l",
+                    "R0.r",
+                    "R1.r",
+                    "CPE1.q",
+                    "CPE1.alpha",
+                    "R2.r",
+                    "CPE2.q",
+                    "CPE2.alpha",
+                ]
                 for x in ["value", "err", "unit"]
             ]
             eis_df = eis_df[["file", "tag", *order]]
@@ -796,13 +805,13 @@ def analyse_sample(
         cv_res["post"] - cv_res["pre"] if (cv_res["post"] and cv_res["pre"]) else None
     )
     summary["Assembled resistance / Ω"]["Value"] = assembled_resistance_ohm
-    summary["EIS R pre / Ω"]["Value"] = eis_res.get("pre", {}).get("R0", {}).get("value")
-    summary["EIS R pre / Ω"]["Error"] = eis_res.get("pre", {}).get("R0", {}).get("err")
+    summary["EIS R pre / Ω"]["Value"] = eis_res.get("pre", {}).get("R0.r", {}).get("value")
+    summary["EIS R pre / Ω"]["Error"] = eis_res.get("pre", {}).get("R0.r", {}).get("err")
     summary["EIS R pre-50%SOC / Ω"]["Value"] = (
-        eis_res.get("pre-50%SOC", {}).get("R0", {}).get("value")
+        eis_res.get("pre-50%SOC", {}).get("R0.r", {}).get("value")
     )
     summary["EIS R pre-50%SOC / Ω"]["Error"] = (
-        eis_res.get("pre-50%SOC", {}).get("R0", {}).get("err")
+        eis_res.get("pre-50%SOC", {}).get("R0.r", {}).get("err")
     )
 
     if cycle_df is not None:
