@@ -721,13 +721,13 @@ def analyse_sample(
             f = Path(eis_file)
             try:
                 df = read_to_bdf(f)
-                params, Z_fit = eis.analyse(df)
+                params, Z_fit = eis.analyse(df, label=f.stem)
                 fig, _ax = eis.plot(df, Z_fit)
                 fig.savefig(results_dir / f"eis_{tag}.png")
                 plt.close(fig)
                 eis_res[tag] = params
                 df["Real Impedance Fit / ohm"] = np.real(Z_fit)
-                df["Real Impedance Fit / ohm"] = np.imag(Z_fit)
+                df["Imaginary Impedance Fit / ohm"] = np.imag(Z_fit)
                 df_save_bdf(df, results_dir / f"eis_{tag}.x", save_format=save_format)
                 tracked_outputs[f"eis_{tag}"] = [results_dir / f"eis_{tag}.png"]
                 if bdf_suffix:

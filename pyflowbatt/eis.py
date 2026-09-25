@@ -3,6 +3,8 @@
 EIS = electrochemical impedance spectroscopy.
 """
 
+import logging
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -10,11 +12,14 @@ from matplotlib.axes import Axes
 from matplotlib.collections import LineCollection
 from matplotlib.figure import Figure
 
+logger = logging.getLogger(__name__)
+
 
 def analyse(
     df: pd.DataFrame,
+    label: str = "",
 ) -> tuple[dict[str, dict], np.ndarray]:
-    """Fit EIS to R-(R,CPE)-(R,CPE) model."""
+    """Fit EIS to R-(R,CPE)-(R,CPE) model, warning if the fit looks unreliable."""
     import fasteis  # noqa: PLC0415
 
     f = df["Frequency / Hz"]
@@ -27,6 +32,10 @@ def analyse(
         name: {"value": res.params[name], "err": errs.get(name), "unit": unit}
         for name, unit in zip(circuit.param_names(), circuit.param_units(), strict=True)
     }
+    if not res.success:
+        logger.warning("- EIS fit %s did not converge", label)
+    if all(p["err"] is None for p in params.values()):
+        logger.warning("- EIS fit %s has no standard errors, parameters are degenerate", label)
     return params, Z_fit
 
 
