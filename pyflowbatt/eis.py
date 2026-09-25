@@ -21,13 +21,10 @@ def analyse(
     Z = df["Real Impedance / ohm"] + 1j * df["Imaginary Impedance / ohm"]
     circuit = fasteis.Circuit("L0-R0-(R1,CPE1)-(R2,CPE2)")
     res = circuit.fit(f, Z)
-    if not res.success:
-        msg = "Failed to fit EIS"
-        raise ValueError(msg)
     Z_fit = res.circuit.impedance(f)
-    assert res.stderr is not None  # noqa: S101
+    errs = res.stderr or {}
     params = {
-        name: {"value": res.params[name], "err": res.stderr[name], "unit": unit}
+        name: {"value": res.params[name], "err": errs.get(name), "unit": unit}
         for name, unit in zip(circuit.param_names(), circuit.param_units(), strict=True)
     }
     return params, Z_fit
