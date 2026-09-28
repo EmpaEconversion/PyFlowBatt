@@ -70,6 +70,9 @@ class PyFlowBattConfig:
         "pre"  = ["*_02_PEIS_*"]
         "post" = ["*_06_PEIS_*"]
 
+        [eis]
+        model = "L0-R0-(R1,CPE1)-(R2,CPE2)"  # any fasteis circuit string
+
         [cv]
         v_min = 0.4     # voltage window used to plot
         v_max = 0.6
@@ -98,6 +101,7 @@ class PyFlowBattConfig:
     extensions: list[str] = field(default_factory=lambda: [".mpr"])
     # EIS tag -> glob patterns; tags not listed are assigned in filename order
     eis_tag_patterns: dict[str, list[str]] = field(default_factory=dict)
+    eis_model: str = "L0-R0-(R1,CPE1)-(R2,CPE2)"  # fasteis circuit string fitted to EIS
     sample_name_pattern: str = r"^\d+_.+_.+$"
     sample_name: str | None = None  # overrides pattern entirely
     lsv_threshold: int = 8  # numeric cutoff for pre/post when only one LSV file is found
@@ -191,6 +195,13 @@ class PyFlowBattConfig:
                 )
                 continue
             self.eis_tag_patterns[tag] = list(values)
+
+        eis = data.get("eis", {})
+        if "model" in eis:
+            if isinstance(eis["model"], str):
+                self.eis_model = eis["model"]
+            else:
+                logger.warning("Ignoring bad eis.model in %s (expected string)", path)
 
         for key in ("extensions", "extra_extensions"):
             if key in data:
@@ -303,6 +314,13 @@ TEMPLATE_TOML = """\
 # [eis_tags]
 # "pre"  = ["*_02_PEIS_*"]
 # "post" = ["*_06_PEIS_*"]
+
+# --- EIS equivalent circuit model ---
+# Any fasteis circuit string. R0 is reported in the summary as EIS R, and only
+# models in the fasteis ML library get automatic initial fit parameters.
+# See https://empaeconversion.github.io/fasteis/models/
+# [eis]
+# model = "L0-R0-(R1,CPE1)-(R2,CPE2)"
 
 # --- CV analysis parameters ---
 # [cv]

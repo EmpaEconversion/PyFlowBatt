@@ -1398,3 +1398,85 @@ def test_cascade_priority(tmp_path: Path) -> None:
         "*_FROM_PARENT_*",
         "*_FROM_SAMPLE_*",
     ]
+
+
+def test_eis_model_default_matches_eis_module() -> None:
+    """Without a pyflowbatt.toml, the EIS model is eis.DEFAULT_MODEL."""
+    from pyflowbatt import eis
+
+    assert PyFlowBattConfig().eis_model == eis.DEFAULT_MODEL
+
+
+def test_eis_model_toml_override(tmp_path: Path) -> None:
+    """[eis] model in pyflowbatt.toml accepts any string."""
+    sample_dir = tmp_path / "sample"
+    sample_dir.mkdir()
+    (sample_dir / "pyflowbatt.toml").write_text('[eis]\nmodel = "R0-(R1,CPE1)-Wo1"\n')
+
+    config = PyFlowBattConfig.load(sample_dir, home=tmp_path / "home")
+    assert config.eis_model == "R0-(R1,CPE1)-Wo1"
+
+
+def test_eis_model_bad_value_ignored(tmp_path: Path) -> None:
+    """A non-string [eis] model is ignored, keeping the default."""
+    sample_dir = tmp_path / "sample"
+    sample_dir.mkdir()
+    (sample_dir / "pyflowbatt.toml").write_text("[eis]\nmodel = 5\n")
+
+    config = PyFlowBattConfig.load(sample_dir, home=tmp_path / "home")
+    assert config.eis_model == "L0-R0-(R1,CPE1)-(R2,CPE2)"
+
+
+@pytest.mark.parametrize(
+    ("model", "has_ml", "warnings"),
+    [
+        ("L0-R0-(R1,CPE1)-(R2,CPE2)", True, []),
+        ("two_rq_l", True, []),
+        ("(R1,CPE1)-R0", True, []),
+        ("R1-(R2,CPE2)", True, ["has no R0"]),
+        ("R0-(R1,CPE1)-W2-Wo3", False, ["not in the fasteis ML model library"]),
+        ("R1-(R2,CPE2)-W3-Wo4", False, ["has no R0", "not in the fasteis ML model library"]),
+    ],
+)
+def test_eis_check_model_warnings(
+    model: str, has_ml: bool, warnings: list[str], caplog: pytest.LogCaptureFixture
+) -> None:
+    """check_model warns about a missing R0 and a missing ML model, pointing at the docs."""
+    from pyflowbatt import eis
+
+    with caplog.at_level("WARNING", logger="pyflowbatt.eis"):
+        names, ml = eis.check_model(model)
+    assert ml is has_ml
+    assert len(names) > 0
+    messages = [r.getMessage() for r in caplog.records]
+    assert len(messages) == len(warnings)
+    for message, expected in zip(messages, warnings, strict=True):
+        assert expected in message
+        assert eis.MODELS_URL in message
+
+
+def test_eis_check_model_invalid_raises() -> None:
+    """An invalid circuit string raises ValueError."""
+    from pyflowbatt import eis
+
+    with pytest.raises(ValueError):
+        eis.check_model("R0-(R1")
+
+
+def test_eis_analyse_custom_model_without_ml_guess() -> None:
+    """A model outside the ML library still fits, with columns named by the circuit."""
+    import fasteis
+    import numpy as np
+    import pandas as pd
+
+    from pyflowbatt import eis
+
+    model = "R0-(R1,CPE1)-Wo1"
+    f = np.logspace(5, -1, 40)
+    Z = fasteis.Circuit(model).with_values([1.0, 2.0, 1e-3, 0.9, 3.0, 10.0]).impedance(f)
+    df = pd.DataFrame(
+        {"Frequency / Hz": f, "Real Impedance / ohm": Z.real, "Imaginary Impedance / ohm": Z.imag}
+    )
+    params, Z_fit = eis.analyse(df, model=model, guess_init=False)
+    assert list(params) == ["R0.r", "R1.r", "CPE1.q", "CPE1.alpha", "Wo1.z0", "Wo1.tau"]
+    assert len(Z_fit) == len(f)

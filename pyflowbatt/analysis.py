@@ -714,52 +714,47 @@ def analyse_sample(
     logger.info("🌈 Analysing PEIS")
     eis_res = {}
     rows = []
+    param_names: list[str] = []
+    has_ml_guess = False
+    eis_to_fit = eis_by_tag
     if not eis_by_tag:
         logger.warning("- ☹️ No EIS files were found, skipping")
     else:
-        for tag, eis_file in eis_by_tag.items():
-            f = Path(eis_file)
-            try:
-                df = read_to_bdf(f)
-                params, Z_fit = eis.analyse(df, label=f.stem)
-                fig, _ax = eis.plot(df, Z_fit)
-                fig.savefig(results_dir / f"eis_{tag}.png")
-                plt.close(fig)
-                eis_res[tag] = params
-                df["Real Impedance Fit / ohm"] = np.real(Z_fit)
-                df["Imaginary Impedance Fit / ohm"] = np.imag(Z_fit)
-                df_save_bdf(df, results_dir / f"eis_{tag}.x", save_format=save_format)
-                tracked_outputs[f"eis_{tag}"] = [results_dir / f"eis_{tag}.png"]
-                if bdf_suffix:
-                    tracked_outputs[f"eis_{tag}"].append(
-                        (results_dir / f"eis_{tag}.x").with_suffix(bdf_suffix)
-                    )
-                tracked_mpr_inputs[f"eis_{tag}"] = [Path(eis_file)]
-                for name, values in params.items():
-                    rows.append({"file": f.stem, "tag": tag, "name": name, **values})
-            except Exception as e:
-                logger.warning("- Failed to fit %s: %s", f.stem, str(e))
-        if rows:
-            eis_df = pd.DataFrame(rows)
-            eis_df = eis_df.pivot(index=["file", "tag"], columns=["name"]).reset_index()
-            eis_df.columns = [
-                f"{name}_{field}" if name else field for field, name in eis_df.columns
-            ]
-            order = [
-                f"{elem}_{x}"
-                for elem in [
-                    "L0.l",
-                    "R0.r",
-                    "R1.r",
-                    "CPE1.q",
-                    "CPE1.alpha",
-                    "R2.r",
-                    "CPE2.q",
-                    "CPE2.alpha",
-                ]
-                for x in ["value", "err", "unit"]
-            ]
-            eis_df = eis_df[["file", "tag", *order]]
+        try:
+            param_names, has_ml_guess = eis.check_model(config.eis_model)
+        except ValueError as e:
+            logger.warning("- Invalid EIS model %s, skipping EIS: %s", config.eis_model, e)
+            eis_to_fit = {}
+    for tag, eis_file in eis_to_fit.items():
+        f = Path(eis_file)
+        try:
+            df = read_to_bdf(f)
+            params, Z_fit = eis.analyse(
+                df, label=f.stem, model=config.eis_model, guess_init=has_ml_guess
+            )
+            fig, _ax = eis.plot(df, Z_fit)
+            fig.savefig(results_dir / f"eis_{tag}.png")
+            plt.close(fig)
+            eis_res[tag] = params
+            df["Real Impedance Fit / ohm"] = np.real(Z_fit)
+            df["Imaginary Impedance Fit / ohm"] = np.imag(Z_fit)
+            df_save_bdf(df, results_dir / f"eis_{tag}.x", save_format=save_format)
+            tracked_outputs[f"eis_{tag}"] = [results_dir / f"eis_{tag}.png"]
+            if bdf_suffix:
+                tracked_outputs[f"eis_{tag}"].append(
+                    (results_dir / f"eis_{tag}.x").with_suffix(bdf_suffix)
+                )
+            tracked_mpr_inputs[f"eis_{tag}"] = [Path(eis_file)]
+            for name, values in params.items():
+                rows.append({"file": f.stem, "tag": tag, "name": name, **values})
+        except Exception as e:
+            logger.warning("- Failed to fit %s: %s", f.stem, str(e))
+    if rows:
+        eis_df = pd.DataFrame(rows)
+        eis_df = eis_df.pivot(index=["file", "tag"], columns=["name"]).reset_index()
+        eis_df.columns = [f"{name}_{field}" if name else field for field, name in eis_df.columns]
+        order = [f"{name}_{x}" for name in param_names for x in ["value", "err", "unit"]]
+        eis_df = eis_df[["file", "tag", *order]]
 
     logger.info("💪 Making sample summary")
 
