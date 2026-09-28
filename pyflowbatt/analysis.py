@@ -15,7 +15,12 @@ import pandas as pd
 from battinfoconverter_backend import convert_excel_to_jsonld
 
 from pyflowbatt import battinfo, cv, eis, gcpl, lsv, ocv
-from pyflowbatt.config import DEFAULT_AREA_CM2, PyFlowBattConfig, classify_technique_files
+from pyflowbatt.config import (
+    DEFAULT_AREA_CM2,
+    EIS_TAGS,
+    PyFlowBattConfig,
+    classify_technique_files,
+)
 from pyflowbatt.read import read_to_bdf
 
 logger = logging.getLogger(__name__)
@@ -143,6 +148,13 @@ def _generic_eis_parts(label: str) -> tuple[str, str] | None:
     return ("before" if match.group(1) == "pre" else "after", match.group(2))
 
 
+def _custom_eis_tag(label: str) -> str | None:
+    """Tag of an EIS label set in pyflowbatt.toml, e.g. "pre-20%SOC" from "eis_pre-20%SOC"."""
+    if not label.startswith("eis_") or _GENERIC_EIS_RE.match(label):
+        return None
+    return label.removeprefix("eis_")
+
+
 def raw_description(label: str, path: Path) -> str | None:
     """Describe a raw input file, naming the format only where we know what it is."""
     if label in RAW_INPUT_DESCRIPTIONS:
@@ -152,6 +164,8 @@ def raw_description(label: str, path: Path) -> str | None:
     elif parts := _generic_eis_parts(label):
         when, number = parts
         description = f"EIS measurement, {when} cycling, measurement {number}"
+    elif tag := _custom_eis_tag(label):
+        description = f"EIS measurement, tagged {tag}"
     else:
         return None
     if path.suffix.lower() == ".mpr":
@@ -169,6 +183,8 @@ def plot_description(label: str) -> str | None:
             "Nyquist plot for electrochemical impedance spectroscopy (EIS) "
             f"from {when} cycling, measurement {number}"
         )
+    if tag := _custom_eis_tag(label):
+        return f"Nyquist plot for electrochemical impedance spectroscopy (EIS), tagged {tag}"
     return None
 
 
@@ -181,6 +197,11 @@ def data_description(label: str) -> str | None:
         return (
             "Frequency-domain electrochemical impedance spectroscopy (EIS) data "
             f"from {when} cycling, measurement {number}, using the battery data format (BDF)"
+        )
+    if tag := _custom_eis_tag(label):
+        return (
+            "Frequency-domain electrochemical impedance spectroscopy (EIS) data, "
+            f"tagged {tag}, using the battery data format (BDF)"
         )
     return None
 
@@ -714,14 +735,14 @@ def analyse_sample(
     logger.info("🌈 Analysing PEIS")
     eis_res = {}
     rows = []
-    param_names: list[str] = []
+    eis_units: dict[str, str] = {}
     has_ml_guess = False
     eis_to_fit = eis_by_tag
     if not eis_by_tag:
         logger.warning("- ☹️ No EIS files were found, skipping")
     else:
         try:
-            param_names, has_ml_guess = eis.check_model(config.eis_model)
+            eis_units, has_ml_guess = eis.check_model(config.eis_model, config.eis_summary_params)
         except ValueError as e:
             logger.warning("- Invalid EIS model %s, skipping EIS: %s", config.eis_model, e)
             eis_to_fit = {}
@@ -753,10 +774,21 @@ def analyse_sample(
         eis_df = pd.DataFrame(rows)
         eis_df = eis_df.pivot(index=["file", "tag"], columns=["name"]).reset_index()
         eis_df.columns = [f"{name}_{field}" if name else field for field, name in eis_df.columns]
-        order = [f"{name}_{x}" for name in param_names for x in ["value", "err", "unit"]]
+        order = [f"{name}_{x}" for name in eis_units for x in ["value", "err", "unit"]]
         eis_df = eis_df[["file", "tag", *order]]
 
     logger.info("💪 Making sample summary")
+
+    # Standard tags always get rows so combined summaries line up, other tags follow
+    eis_tags = [*EIS_TAGS, *(tag for tag in eis_res if tag not in EIS_TAGS)]
+    eis_rows = {}
+    for param in config.eis_summary_params:
+        if param not in eis_units:
+            continue
+        for tag in eis_tags:
+            fit = eis_res.get(tag, {}).get(param, {})
+            label = eis.summary_label(param, tag, eis_units[param])
+            eis_rows[label] = {"Value": fit.get("value"), "Error": fit.get("err")}
 
     # Create keys
     cols = [
@@ -768,8 +800,7 @@ def analyse_sample(
         "F post / mF",
         "∆F / mF",
         "Assembled resistance / Ω",
-        "EIS R pre / Ω",
-        "EIS R pre-50%SOC / Ω",
+        *eis_rows,
         "1st CE / %",
         "1st EE / %",
         "1st VE / %",
@@ -800,14 +831,7 @@ def analyse_sample(
         cv_res["post"] - cv_res["pre"] if (cv_res["post"] and cv_res["pre"]) else None
     )
     summary["Assembled resistance / Ω"]["Value"] = assembled_resistance_ohm
-    summary["EIS R pre / Ω"]["Value"] = eis_res.get("pre", {}).get("R0.r", {}).get("value")
-    summary["EIS R pre / Ω"]["Error"] = eis_res.get("pre", {}).get("R0.r", {}).get("err")
-    summary["EIS R pre-50%SOC / Ω"]["Value"] = (
-        eis_res.get("pre-50%SOC", {}).get("R0.r", {}).get("value")
-    )
-    summary["EIS R pre-50%SOC / Ω"]["Error"] = (
-        eis_res.get("pre-50%SOC", {}).get("R0.r", {}).get("err")
-    )
+    summary.update(eis_rows)
 
     if cycle_df is not None:
         mask = cycle_df["Cycle Count / 1"] == 1

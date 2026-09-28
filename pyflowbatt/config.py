@@ -19,6 +19,7 @@ EIS_TAGS = ["pre", "pre-50%SOC", "post-50%SOC", "post"]
 DEFAULT_AREA_CM2 = 5.0  # fallback electrode area (cm^2) when no toml or BattINFO value exists
 _LSV_NUMBER_RE = re.compile(r"_(\d+)_LSV_")
 _STEP_NUMBER_RE = re.compile(r"_(\d+)_[A-Za-z]")
+_EIS_TAG_RE = re.compile(r"^[A-Za-z0-9%.+-]+$")  # tags become part of output filenames
 
 _TECHNIQUE_KEYS: dict[str, str] = {
     "gcpl": "gcpl_patterns",
@@ -66,12 +67,14 @@ class PyFlowBattConfig:
         eis  = ["*_EIS_*"]    # adds to the built-in *_PEIS_*
         gcpl = ["*_GCD_*"]
 
-        [eis_tags]            # pin EIS files to tags instead of filename order
+        [eis_tags]            # pin EIS files to tags, any name, instead of filename order
         "pre"  = ["*_02_PEIS_*"]
+        "pre-20%SOC" = ["*_03_PEIS_*"]
         "post" = ["*_06_PEIS_*"]
 
         [eis]
         model = "L0-R0-(R1,CPE1)-(R2,CPE2)"  # any fasteis circuit string
+        summary_params = ["R0.r", "R1.r"]    # fit parameters reported in the summary
 
         [cv]
         v_min = 0.4     # voltage window used to plot
@@ -102,6 +105,7 @@ class PyFlowBattConfig:
     # EIS tag -> glob patterns; tags not listed are assigned in filename order
     eis_tag_patterns: dict[str, list[str]] = field(default_factory=dict)
     eis_model: str = "L0-R0-(R1,CPE1)-(R2,CPE2)"  # fasteis circuit string fitted to EIS
+    eis_summary_params: list[str] = field(default_factory=lambda: ["R0.r"])
     sample_name_pattern: str = r"^\d+_.+_.+$"
     sample_name: str | None = None  # overrides pattern entirely
     lsv_threshold: int = 8  # numeric cutoff for pre/post when only one LSV file is found
@@ -184,9 +188,11 @@ class PyFlowBattConfig:
 
         eis_tags = data.get("eis_tags", {})
         for tag, values in eis_tags.items():
-            if tag not in EIS_TAGS:
+            if not _EIS_TAG_RE.match(tag):
                 logger.warning(
-                    "Ignoring unknown eis_tags.%s in %s (expected one of %s)", tag, path, EIS_TAGS
+                    "Ignoring eis_tags.%s in %s (tags may only use letters, digits and %%.+-)",
+                    tag,
+                    path,
                 )
                 continue
             if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
@@ -202,6 +208,14 @@ class PyFlowBattConfig:
                 self.eis_model = eis["model"]
             else:
                 logger.warning("Ignoring bad eis.model in %s (expected string)", path)
+        if "summary_params" in eis:
+            values = eis["summary_params"]
+            if isinstance(values, list) and all(isinstance(v, str) for v in values):
+                self.eis_summary_params = list(values)
+            else:
+                logger.warning(
+                    "Ignoring bad eis.summary_params in %s (expected list of strings)", path
+                )
 
         for key in ("extensions", "extra_extensions"):
             if key in data:
@@ -309,18 +323,23 @@ TEMPLATE_TOML = """\
 # eis     = ["*_impedance_*"]                # built-in: *_PEIS_*
 
 # --- Pin EIS files to specific tags (default: tagged in filename order) ---
-# Tags: "pre", "pre-50%SOC", "post-50%SOC", "post". Unlisted tags are filled in
-# filename order from the remaining EIS files.
+# Standard tags: "pre", "pre-50%SOC", "post-50%SOC", "post". Any other name made of
+# letters, digits and %.+- also works, e.g. "pre-20%SOC". Unpinned EIS files fill
+# the unused standard tags in filename order. Each tag gets its own summary rows.
 # [eis_tags]
 # "pre"  = ["*_02_PEIS_*"]
+# "pre-20%SOC" = ["*_03_PEIS_*"]
 # "post" = ["*_06_PEIS_*"]
 
 # --- EIS equivalent circuit model ---
-# Any fasteis circuit string. R0 is reported in the summary as EIS R, and only
-# models in the fasteis ML library get automatic initial fit parameters.
+# Any fasteis circuit string, or a built-in name such as "two_rq_l" or "randles".
+# Only models in the fasteis ML library get automatic initial fit parameters.
 # See https://empaeconversion.github.io/fasteis/models/
+# summary_params lists the fit parameters reported in the summary for each EIS tag,
+# named as in the EIS sheet, e.g. "R0.r", "R1.r", "CPE1.alpha".
 # [eis]
 # model = "L0-R0-(R1,CPE1)-(R2,CPE2)"
+# summary_params = ["R0.r"]
 
 # --- CV analysis parameters ---
 # [cv]
@@ -448,8 +467,7 @@ def _classify_eis(
     """
     result: dict[str, list[Path]] = {}
     pinned: set[Path] = set()
-    for tag in EIS_TAGS:
-        patterns = config.eis_tag_patterns.get(tag)
+    for tag, patterns in config.eis_tag_patterns.items():
         if not patterns:
             continue
         matches = sorted(_glob_many(folder, patterns, config.extensions))

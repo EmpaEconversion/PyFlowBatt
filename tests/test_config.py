@@ -236,6 +236,25 @@ def test_eis_tags_pin_files_to_tags(tmp_path: Path) -> None:
     assert eis == {"eis_pre": "s_02_PEIS_A.mpr", "eis_post": "s_06_PEIS_A.mpr"}
 
 
+def test_eis_tags_custom_names(tmp_path: Path) -> None:
+    """Any filename-safe tag can be pinned, and unpinned files fill the standard tags."""
+    sample = _write_two_eis_sample(tmp_path / "sample")
+    (sample / "s_07_PEIS_A.mpr").write_text("x")
+    (sample / "pyflowbatt.toml").write_text(
+        '[eis_tags]\n"pre-20%SOC" = ["*_02_PEIS_*"]\n"post-80%SOC" = ["*_07_PEIS_*"]\n'
+    )
+    config = PyFlowBattConfig.load(sample, home=tmp_path / "home")
+
+    classified = classify_technique_files(sample, config)
+
+    eis = {k: v[0].name for k, v in classified.items() if k.startswith("eis_")}
+    assert eis == {
+        "eis_pre-20%SOC": "s_02_PEIS_A.mpr",
+        "eis_post-80%SOC": "s_07_PEIS_A.mpr",
+        "eis_pre": "s_06_PEIS_A.mpr",
+    }
+
+
 def test_eis_tags_partial_fills_remaining_tags_in_order(tmp_path: Path) -> None:
     """Tags not listed in eis_tags are filled in filename order from the unpinned files."""
     sample = _write_two_eis_sample(tmp_path / "sample")
@@ -261,10 +280,11 @@ def test_eis_tags_sample_folder_overrides_parent(tmp_path: Path) -> None:
 
 
 def test_eis_tags_bad_entries_ignored(tmp_path: Path) -> None:
-    """Unknown tags and non-list values in eis_tags are ignored."""
+    """Tags with unsafe filename characters and non-list values in eis_tags are ignored."""
     sample = _write_two_eis_sample(tmp_path / "sample")
     (sample / "pyflowbatt.toml").write_text(
-        '[eis_tags]\n"during" = ["*_06_PEIS_*"]\n"post" = "*_06_PEIS_*"\n'
+        '[eis_tags]\n"pre/20" = ["*_06_PEIS_*"]\n"mid 1" = ["*_06_PEIS_*"]\n'
+        '"post" = "*_06_PEIS_*"\n'
     )
     config = PyFlowBattConfig.load(sample, home=tmp_path / "home")
 
@@ -1428,26 +1448,35 @@ def test_eis_model_bad_value_ignored(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("model", "has_ml", "warnings"),
+    ("model", "summary_params", "has_ml", "warnings"),
     [
-        ("L0-R0-(R1,CPE1)-(R2,CPE2)", True, []),
-        ("two_rq_l", True, []),
-        ("(R1,CPE1)-R0", True, []),
-        ("R1-(R2,CPE2)", True, ["has no R0"]),
-        ("R0-(R1,CPE1)-W2-Wo3", False, ["not in the fasteis ML model library"]),
-        ("R1-(R2,CPE2)-W3-Wo4", False, ["has no R0", "not in the fasteis ML model library"]),
+        ("L0-R0-(R1,CPE1)-(R2,CPE2)", ["R0.r"], True, []),
+        ("two_rq_l", ["R0.r", "CPE2.alpha"], True, []),
+        ("(R1,CPE1)-R0", ["R0.r"], True, []),
+        ("R1-(R2,CPE2)", ["R0.r"], True, ["R0.r is not in model"]),
+        ("R0-(R1,CPE1)-W2-Wo3", ["R0.r"], False, ["not in the fasteis ML model library"]),
+        (
+            "R1-(R2,CPE2)-W3-Wo4",
+            ["R0.r", "Wo4.tau"],
+            False,
+            ["R0.r is not in model", "not in the fasteis ML model library"],
+        ),
     ],
 )
 def test_eis_check_model_warnings(
-    model: str, has_ml: bool, warnings: list[str], caplog: pytest.LogCaptureFixture
+    model: str,
+    summary_params: list[str],
+    has_ml: bool,
+    warnings: list[str],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """check_model warns about a missing R0 and a missing ML model, pointing at the docs."""
+    """check_model warns about missing summary params and a missing ML model."""
     from pyflowbatt import eis
 
     with caplog.at_level("WARNING", logger="pyflowbatt.eis"):
-        names, ml = eis.check_model(model)
+        units, ml = eis.check_model(model, summary_params)
     assert ml is has_ml
-    assert len(names) > 0
+    assert len(units) > 0
     messages = [r.getMessage() for r in caplog.records]
     assert len(messages) == len(warnings)
     for message, expected in zip(messages, warnings, strict=True):
@@ -1460,7 +1489,7 @@ def test_eis_check_model_invalid_raises() -> None:
     from pyflowbatt import eis
 
     with pytest.raises(ValueError):
-        eis.check_model("R0-(R1")
+        eis.check_model("R0-(R1", ["R0.r"])
 
 
 def test_eis_analyse_custom_model_without_ml_guess() -> None:
@@ -1480,3 +1509,105 @@ def test_eis_analyse_custom_model_without_ml_guess() -> None:
     params, Z_fit = eis.analyse(df, model=model, guess_init=False)
     assert list(params) == ["R0.r", "R1.r", "CPE1.q", "CPE1.alpha", "Wo1.z0", "Wo1.tau"]
     assert len(Z_fit) == len(f)
+
+
+def test_eis_summary_params_toml_override(tmp_path: Path) -> None:
+    """[eis] summary_params replaces the default list, and bad values are ignored."""
+    sample_dir = tmp_path / "sample"
+    sample_dir.mkdir()
+    home = tmp_path / "home"
+    toml = sample_dir / "pyflowbatt.toml"
+    assert PyFlowBattConfig.load(sample_dir, home=home).eis_summary_params == ["R0.r"]
+
+    toml.write_text('[eis]\nsummary_params = ["R0.r", "R1.r"]\n')
+    assert PyFlowBattConfig.load(sample_dir, home=home).eis_summary_params == ["R0.r", "R1.r"]
+
+    toml.write_text('[eis]\nsummary_params = "R1.r"\n')
+    assert PyFlowBattConfig.load(sample_dir, home=home).eis_summary_params == ["R0.r"]
+
+
+def test_eis_summary_label_pretty_units() -> None:
+    """Summary labels use display units, passing unknown unit strings through."""
+    from pyflowbatt import eis
+
+    assert eis.summary_label("R0.r", "pre", "ohm") == "EIS R0.r pre / Ω"
+    assert eis.summary_label("CPE1.alpha", "post", "-") == "EIS CPE1.alpha post / 1"
+    assert eis.summary_label("X1.y", "pre", "odd") == "EIS X1.y pre / odd"
+
+
+def test_analyse_sample_summary_reports_every_eis_tag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every summary param gets a row per standard tag plus each extra fitted tag."""
+    import numpy as np
+    import pandas as pd
+
+    from pyflowbatt import analysis as analysis_module
+
+    sample = _write_two_eis_sample(tmp_path / "sample")
+    (sample / "s_07_PEIS_A.mpr").write_text("x")
+    (sample / "pyflowbatt.toml").write_text(
+        '[eis_tags]\n"pre-20%SOC" = ["*_07_PEIS_*"]\n'
+        '[eis]\nsummary_params = ["R0.r", "CPE1.alpha", "Missing.x"]\n'
+    )
+    fitted = {"s_02_PEIS_A": 1.0, "s_06_PEIS_A": 2.0, "s_07_PEIS_A": 3.0}
+
+    def fake_analyse(_df: object, label: str, **_kwargs: object) -> tuple[dict, np.ndarray]:
+        r0 = fitted[label]
+        params = {
+            "R0.r": {"value": r0, "err": r0 / 10, "unit": "ohm"},
+            "CPE1.alpha": {"value": 0.9, "err": None, "unit": "-"},
+        }
+        return params, np.array([1 + 1j])
+
+    def fake_plot(_df: object, _z_fit: np.ndarray) -> tuple:
+        import matplotlib.pyplot as plt
+
+        return plt.subplots()
+
+    def fake_check_model(_model: str, _params: list[str]) -> tuple[dict[str, str], bool]:
+        return {"R0.r": "ohm", "CPE1.alpha": "-"}, True
+
+    monkeypatch.setattr(analysis_module, "read_to_bdf", lambda _f: pd.DataFrame({"x": [0]}))
+    monkeypatch.setattr(analysis_module, "df_save_bdf", lambda *_a, **_k: None)
+    monkeypatch.setattr(analysis_module.eis, "analyse", fake_analyse)
+    monkeypatch.setattr(analysis_module.eis, "plot", fake_plot)
+    monkeypatch.setattr(analysis_module.eis, "check_model", fake_check_model)
+
+    config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
+    analysis_module.analyse_sample(sample, save_format=None, config=config)
+
+    df = pd.read_excel(sample / "results" / "summary.xlsx", sheet_name="Summary", index_col=0)
+    eis_rows = [q for q in df.index if q.startswith("EIS")]
+    assert eis_rows == [
+        "EIS R0.r pre / Ω",
+        "EIS R0.r pre-50%SOC / Ω",
+        "EIS R0.r post-50%SOC / Ω",
+        "EIS R0.r post / Ω",
+        "EIS R0.r pre-20%SOC / Ω",
+        "EIS CPE1.alpha pre / 1",
+        "EIS CPE1.alpha pre-50%SOC / 1",
+        "EIS CPE1.alpha post-50%SOC / 1",
+        "EIS CPE1.alpha post / 1",
+        "EIS CPE1.alpha pre-20%SOC / 1",
+    ]
+    assert df.loc["EIS R0.r pre / Ω", "Value"] == 1.0
+    assert df.loc["EIS R0.r pre / Ω", "Error"] == 0.1
+    assert df.loc["EIS R0.r pre-20%SOC / Ω", "Value"] == 3.0
+    assert df.loc["EIS R0.r pre-50%SOC / Ω", "Value"] == 2.0
+    assert np.isnan(df.loc["EIS R0.r post / Ω", "Value"])
+
+
+def test_custom_eis_tag_descriptions() -> None:
+    """Custom EIS tags get descriptions naming the tag, standard ones keep theirs."""
+    from pyflowbatt import analysis as analysis_module
+    from pyflowbatt.rocrate_output import _measurement_technique
+
+    label = "eis_pre-20%SOC"
+    assert "tagged pre-20%SOC" in analysis_module.raw_description(label, Path("a.mpr"))
+    assert "tagged pre-20%SOC" in analysis_module.plot_description(label)
+    assert "tagged pre-20%SOC" in analysis_module.data_description(label)
+    assert _measurement_technique(label) == "Electrochemical Impedance Spectroscopy (pre-20%SOC)"
+    standard = analysis_module.OUTPUT_PLOT_DESCRIPTIONS["eis_pre"]
+    assert analysis_module.plot_description("eis_pre") == standard
+    assert "measurement 2" in analysis_module.plot_description("eis_post_2")

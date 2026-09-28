@@ -15,26 +15,49 @@ from matplotlib.figure import Figure
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "L0-R0-(R1,CPE1)-(R2,CPE2)"
+DEFAULT_SUMMARY_PARAMS = ["R0.r"]
 MODELS_URL = "https://empaeconversion.github.io/fasteis/models/"
 
+# fasteis unit strings -> units for summary row labels
+PRETTY_UNITS: dict[str, str] = {
+    "ohm": "Ω",
+    "F": "F",
+    "H": "H",
+    "H*s": "H s",
+    "s": "s",
+    "-": "1",
+    "ohm^-1*s^alpha": "Ω⁻¹ s^α",  # noqa: RUF001
+    "ohm*s^-0.5": "Ω s^-0.5",
+    "F*s^(gamma-1)": "F s^(γ-1)",  # noqa: RUF001
+    "ohm*m^2": "Ω m²",
+}
 
-def check_model(model: str) -> tuple[list[str], bool]:
-    """Validate an EIS circuit string, warning if it lacks R0 or an ML initial-guess model.
 
-    Returns the parameter names and whether fasteis can guess initial parameters.
-    Raises ValueError if the string is not a valid fasteis circuit.
+def summary_label(param: str, tag: str, unit: str) -> str:
+    """Summary sheet row label for one fit parameter of one tagged EIS measurement."""
+    return f"EIS {param} {tag} / {PRETTY_UNITS.get(unit, unit)}"
+
+
+def check_model(model: str, summary_params: list[str]) -> tuple[dict[str, str], bool]:
+    """Validate an EIS circuit string, warning about missing summary params or ML model.
+
+    Returns the parameter units keyed by name, and whether fasteis can guess initial
+    parameters. Raises ValueError if the string is not a valid fasteis circuit.
     """
     import fasteis  # noqa: PLC0415
 
     circuit = fasteis.Circuit(model)
-    names = circuit.param_names()
-    if "R0.r" not in names:
-        logger.warning(
-            "- EIS model %s has no R0, so EIS R will be missing from the summary. "
-            "See %s for how to write circuits",
-            model,
-            MODELS_URL,
-        )
+    units = dict(zip(circuit.param_names(), circuit.param_units(), strict=True))
+    for param in summary_params:
+        if param not in units:
+            logger.warning(
+                "- EIS summary parameter %s is not in model %s (parameters: %s), so it will "
+                "be missing from the summary. See %s for how to write circuits",
+                param,
+                model,
+                ", ".join(units),
+                MODELS_URL,
+            )
     # A synthetic spectrum is enough to find out if a trained model exists
     f = np.logspace(-1, 5, 10)
     try:
@@ -46,8 +69,8 @@ def check_model(model: str) -> tuple[list[str], bool]:
             model,
             MODELS_URL,
         )
-        return names, False
-    return names, True
+        return units, False
+    return units, True
 
 
 def analyse(
