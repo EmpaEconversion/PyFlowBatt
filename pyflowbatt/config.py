@@ -16,6 +16,11 @@ logger = logging.getLogger(__name__)
 
 CONFIG_FILENAME = "pyflowbatt.toml"
 EIS_TAGS = ["pre", "pre-50%SOC", "post-50%SOC", "post"]
+# Standard protocol layouts, keyed by (EIS count before, after cycling), in time order
+_EIS_LAYOUTS: dict[tuple[int, int], tuple[list[str], list[str]]] = {
+    (2, 2): (["pre", "pre-50%SOC"], ["post-50%SOC", "post"]),
+    (1, 1): (["pre"], ["post"]),
+}
 DEFAULT_AREA_CM2 = 5.0  # fallback electrode area (cm^2) when no toml or BattINFO value exists
 _LSV_NUMBER_RE = re.compile(r"_(\d+)_LSV_")
 _STEP_NUMBER_RE = re.compile(r"_(\d+)_[A-Za-z]")
@@ -462,8 +467,8 @@ def _classify_eis(
 ) -> dict[str, list[Path]]:
     """Tag EIS files, splitting them around the main cycling step.
 
-    Files pinned by `eis_tag_patterns` win; any remaining files are tagged in
-    filename order if pins exist, otherwise by :func:`_eis_order_and_tags`.
+    Files pinned by `eis_tag_patterns` win; any remaining files are tagged by
+    :func:`_eis_order_and_tags`, with pinned standard tags counted in the layout.
     """
     result: dict[str, list[Path]] = {}
     pinned: set[Path] = set()
@@ -487,12 +492,8 @@ def _classify_eis(
     if not free_files:
         return result
 
-    # With pins in play, the remaining files just fill whatever tags are left over.
-    if pinned:
-        ordered = free_files
-        tags = [tag for tag in EIS_TAGS if f"eis_{tag}" not in result]
-    else:
-        ordered, tags = _eis_order_and_tags(free_files, gcpl_file, warn=warn)
+    taken = {tag for tag in EIS_TAGS if f"eis_{tag}" in result}
+    ordered, tags = _eis_order_and_tags(free_files, gcpl_file, taken=taken, warn=warn)
     for tag, f in zip(tags, ordered, strict=False):
         result[f"eis_{tag}"] = [f]
     return result
@@ -546,31 +547,42 @@ def _eis_sort_keys(
 
 
 def _eis_order_and_tags(
-    eis_files: list[Path], gcpl_file: Path | None, *, warn: bool
+    eis_files: list[Path],
+    gcpl_file: Path | None,
+    *,
+    taken: set[str] | None = None,
+    warn: bool,
 ) -> tuple[list[Path], list[str]]:
     """Order EIS files by when they ran and tag them by the protocol's layout.
 
     Two before and two after cycling is the standard protocol (0% and 50% SOC, each
-    side); one before and one after is the early protocol (0% SOC either side). Any
-    other layout can't be mapped onto the SOC-specific tags, so files get numbered
-    `pre_N`/`post_N` tags instead. Falls back to filename order when neither step
-    numbers nor timestamps are readable.
+    side); one before and one after is the early protocol (0% SOC either side).
+    Standard tags in `taken` are already pinned to other files: they count towards
+    the layout, and `eis_files` fill the rest. Any other layout can't be mapped onto
+    the SOC-specific tags, so files get numbered `pre_N`/`post_N` tags instead.
+    Falls back to filename order when neither step numbers nor timestamps are readable.
     """
+    taken = taken or set()
     keys, gcpl_key = _eis_sort_keys(eis_files, gcpl_file)
     if keys is None or gcpl_key is None:
         if warn:
             logger.warning(
                 "Cannot tell which EIS files are before/after cycling, tagging in filename order"
             )
-        return eis_files, EIS_TAGS
+        return eis_files, [tag for tag in EIS_TAGS if tag not in taken]
 
     ordered = [f for _, f in sorted(zip(keys, eis_files, strict=True))]
     before = [key for key in keys if key < gcpl_key]
     after = [key for key in keys if key >= gcpl_key]
-    if len(before) == 2 and len(after) == 2:
-        return ordered, EIS_TAGS
-    if len(before) == 1 and len(after) == 1:
-        return ordered, ["pre", "post"]
+    n_pre_taken = sum(tag.startswith("pre") for tag in taken)
+    n_post_taken = len(taken) - n_pre_taken
+    layout = _EIS_LAYOUTS.get((len(before) + n_pre_taken, len(after) + n_post_taken))
+    if layout:
+        pre_tags = [tag for tag in layout[0] if tag not in taken]
+        post_tags = [tag for tag in layout[1] if tag not in taken]
+        # A pinned tag outside the layout, e.g. pre-50%SOC in the early protocol, won't fit
+        if len(pre_tags) == len(before) and len(post_tags) == len(after):
+            return ordered, pre_tags + post_tags
 
     if warn:
         logger.warning(

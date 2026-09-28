@@ -248,15 +248,82 @@ def test_eis_tags_custom_names(tmp_path: Path) -> None:
     classified = classify_technique_files(sample, config)
 
     eis = {k: v[0].name for k, v in classified.items() if k.startswith("eis_")}
+    # Only one unpinned file is left, after cycling, which matches no standard layout
     assert eis == {
         "eis_pre-20%SOC": "s_02_PEIS_A.mpr",
         "eis_post-80%SOC": "s_07_PEIS_A.mpr",
-        "eis_pre": "s_06_PEIS_A.mpr",
+        "eis_post_1": "s_06_PEIS_A.mpr",
     }
 
 
+def test_eis_tags_custom_pin_keeps_standard_layout(tmp_path: Path) -> None:
+    """Pinning an extra custom tag leaves the standard protocol tagging unchanged."""
+    sample = _write_synthetic_sample(tmp_path / "sample")
+    (sample / "sample_03_PEIS_X.mpr").write_text("x")
+    (sample / "pyflowbatt.toml").write_text('[eis_tags]\n"pre-20%SOC" = ["*_03_PEIS_*"]\n')
+    config = PyFlowBattConfig.load(sample, home=tmp_path / "home")
+
+    classified = classify_technique_files(sample, config)
+
+    eis = {k: v[0].name for k, v in classified.items() if k.startswith("eis_")}
+    assert eis == {
+        "eis_pre-20%SOC": "sample_03_PEIS_X.mpr",
+        "eis_pre": "sample_02_PEIS_A.mpr",
+        "eis_pre-50%SOC": "sample_05_PEIS_B.mpr",
+        "eis_post-50%SOC": "sample_10_PEIS_C.mpr",
+        "eis_post": "sample_12_PEIS_D.mpr",
+    }
+
+
+def test_eis_tags_custom_pin_splits_unpinned_around_cycling(tmp_path: Path) -> None:
+    """Unpinned files are split before/after cycling, not filled in filename order."""
+    sample = _write_synthetic_sample(tmp_path / "sample")
+    (sample / "pyflowbatt.toml").write_text('[eis_tags]\n"pre-20%SOC" = ["*_05_PEIS_*"]\n')
+    config = PyFlowBattConfig.load(sample, home=tmp_path / "home")
+
+    classified = classify_technique_files(sample, config)
+
+    # One before and two after cycling is not a standard layout
+    eis = {k: v[0].name for k, v in classified.items() if k.startswith("eis_")}
+    assert eis == {
+        "eis_pre-20%SOC": "sample_05_PEIS_B.mpr",
+        "eis_pre_1": "sample_02_PEIS_A.mpr",
+        "eis_post_1": "sample_10_PEIS_C.mpr",
+        "eis_post_2": "sample_12_PEIS_D.mpr",
+    }
+
+
+def test_eis_tags_pinned_standard_tag_fills_its_side(tmp_path: Path) -> None:
+    """A pinned post tag leaves the other post tag for the unpinned file after cycling."""
+    sample = _write_synthetic_sample(tmp_path / "sample")
+    (sample / "pyflowbatt.toml").write_text('[eis_tags]\n"post" = ["*_12_PEIS_*"]\n')
+    config = PyFlowBattConfig.load(sample, home=tmp_path / "home")
+
+    classified = classify_technique_files(sample, config)
+
+    eis = {k: v[0].name for k, v in classified.items() if k.startswith("eis_")}
+    assert eis == {
+        "eis_post": "sample_12_PEIS_D.mpr",
+        "eis_pre": "sample_02_PEIS_A.mpr",
+        "eis_pre-50%SOC": "sample_05_PEIS_B.mpr",
+        "eis_post-50%SOC": "sample_10_PEIS_C.mpr",
+    }
+
+
+def test_eis_tags_pinned_tag_outside_layout_numbers_the_rest(tmp_path: Path) -> None:
+    """A pinned 50% SOC tag doesn't fit the early protocol, so the rest are numbered."""
+    sample = _write_two_eis_sample(tmp_path / "sample")
+    (sample / "pyflowbatt.toml").write_text('[eis_tags]\n"pre-50%SOC" = ["*_02_PEIS_*"]\n')
+    config = PyFlowBattConfig.load(sample, home=tmp_path / "home")
+
+    classified = classify_technique_files(sample, config)
+
+    eis = {k: v[0].name for k, v in classified.items() if k.startswith("eis_")}
+    assert eis == {"eis_pre-50%SOC": "s_02_PEIS_A.mpr", "eis_post_1": "s_06_PEIS_A.mpr"}
+
+
 def test_eis_tags_partial_fills_remaining_tags_in_order(tmp_path: Path) -> None:
-    """Tags not listed in eis_tags are filled in filename order from the unpinned files."""
+    """A pinned standard tag counts towards the layout, unpinned files fill the rest."""
     sample = _write_two_eis_sample(tmp_path / "sample")
     (sample / "pyflowbatt.toml").write_text('[eis_tags]\n"post" = ["*_06_PEIS_*"]\n')
     config = PyFlowBattConfig.load(sample, home=tmp_path / "home")
@@ -1594,8 +1661,8 @@ def test_analyse_sample_summary_reports_every_eis_tag(
     assert df.loc["EIS R0.r pre / Ω", "Value"] == 1.0
     assert df.loc["EIS R0.r pre / Ω", "Error"] == 0.1
     assert df.loc["EIS R0.r pre-20%SOC / Ω", "Value"] == 3.0
-    assert df.loc["EIS R0.r pre-50%SOC / Ω", "Value"] == 2.0
-    assert np.isnan(df.loc["EIS R0.r post / Ω", "Value"])
+    assert df.loc["EIS R0.r post / Ω", "Value"] == 2.0
+    assert np.isnan(df.loc["EIS R0.r pre-50%SOC / Ω", "Value"])
 
 
 def test_custom_eis_tag_descriptions() -> None:
