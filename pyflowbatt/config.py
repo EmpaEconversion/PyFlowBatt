@@ -16,9 +16,15 @@ logger = logging.getLogger(__name__)
 
 CONFIG_FILENAME = "pyflowbatt.toml"
 EIS_TAGS = ["pre", "pre-50%SOC", "post-50%SOC", "post"]
+# Standard protocol layouts, keyed by (EIS count before, after cycling), in time order
+_EIS_LAYOUTS: dict[tuple[int, int], tuple[list[str], list[str]]] = {
+    (2, 2): (["pre", "pre-50%SOC"], ["post-50%SOC", "post"]),
+    (1, 1): (["pre"], ["post"]),
+}
 DEFAULT_AREA_CM2 = 5.0  # fallback electrode area (cm^2) when no toml or BattINFO value exists
 _LSV_NUMBER_RE = re.compile(r"_(\d+)_LSV_")
 _STEP_NUMBER_RE = re.compile(r"_(\d+)_[A-Za-z]")
+_EIS_TAG_RE = re.compile(r"^[A-Za-z0-9%.+-]+$")  # tags become part of output filenames
 
 _TECHNIQUE_KEYS: dict[str, str] = {
     "gcpl": "gcpl_patterns",
@@ -66,9 +72,14 @@ class PyFlowBattConfig:
         eis  = ["*_EIS_*"]    # adds to the built-in *_PEIS_*
         gcpl = ["*_GCD_*"]
 
-        [eis_tags]            # pin EIS files to tags instead of filename order
+        [eis_tags]            # pin EIS files to tags, any name, instead of filename order
         "pre"  = ["*_02_PEIS_*"]
+        "pre-20%SOC" = ["*_03_PEIS_*"]
         "post" = ["*_06_PEIS_*"]
+
+        [eis]
+        model = "L0-R0-(R1,CPE1)-(R2,CPE2)"  # any fasteis circuit string
+        summary_params = ["R0.r", "R1.r"]    # fit parameters reported in the summary
 
         [cv]
         v_min = 0.4     # voltage window used to plot
@@ -98,6 +109,8 @@ class PyFlowBattConfig:
     extensions: list[str] = field(default_factory=lambda: [".mpr"])
     # EIS tag -> glob patterns; tags not listed are assigned in filename order
     eis_tag_patterns: dict[str, list[str]] = field(default_factory=dict)
+    eis_model: str = "L0-R0-(R1,CPE1)-(R2,CPE2)"  # fasteis circuit string fitted to EIS
+    eis_summary_params: list[str] = field(default_factory=lambda: ["R0.r"])
     sample_name_pattern: str = r"^\d+_.+_.+$"
     sample_name: str | None = None  # overrides pattern entirely
     lsv_threshold: int = 8  # numeric cutoff for pre/post when only one LSV file is found
@@ -180,9 +193,11 @@ class PyFlowBattConfig:
 
         eis_tags = data.get("eis_tags", {})
         for tag, values in eis_tags.items():
-            if tag not in EIS_TAGS:
+            if not _EIS_TAG_RE.match(tag):
                 logger.warning(
-                    "Ignoring unknown eis_tags.%s in %s (expected one of %s)", tag, path, EIS_TAGS
+                    "Ignoring eis_tags.%s in %s (tags may only use letters, digits and %%.+-)",
+                    tag,
+                    path,
                 )
                 continue
             if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
@@ -191,6 +206,21 @@ class PyFlowBattConfig:
                 )
                 continue
             self.eis_tag_patterns[tag] = list(values)
+
+        eis = data.get("eis", {})
+        if "model" in eis:
+            if isinstance(eis["model"], str):
+                self.eis_model = eis["model"]
+            else:
+                logger.warning("Ignoring bad eis.model in %s (expected string)", path)
+        if "summary_params" in eis:
+            values = eis["summary_params"]
+            if isinstance(values, list) and all(isinstance(v, str) for v in values):
+                self.eis_summary_params = list(values)
+            else:
+                logger.warning(
+                    "Ignoring bad eis.summary_params in %s (expected list of strings)", path
+                )
 
         for key in ("extensions", "extra_extensions"):
             if key in data:
@@ -298,11 +328,23 @@ TEMPLATE_TOML = """\
 # eis     = ["*_impedance_*"]                # built-in: *_PEIS_*
 
 # --- Pin EIS files to specific tags (default: tagged in filename order) ---
-# Tags: "pre", "pre-50%SOC", "post-50%SOC", "post". Unlisted tags are filled in
-# filename order from the remaining EIS files.
+# Standard tags: "pre", "pre-50%SOC", "post-50%SOC", "post". Any other name made of
+# letters, digits and %.+- also works, e.g. "pre-20%SOC". Unpinned EIS files fill
+# the unused standard tags in filename order. Each tag gets its own summary rows.
 # [eis_tags]
 # "pre"  = ["*_02_PEIS_*"]
+# "pre-20%SOC" = ["*_03_PEIS_*"]
 # "post" = ["*_06_PEIS_*"]
+
+# --- EIS equivalent circuit model ---
+# Any fasteis circuit string, or a built-in name such as "two_rq_l" or "randles".
+# Only models in the fasteis ML library get automatic initial fit parameters.
+# See https://empaeconversion.github.io/fasteis/models/
+# summary_params lists the fit parameters reported in the summary for each EIS tag,
+# named as in the EIS sheet, e.g. "R0.r", "R1.r", "CPE1.alpha".
+# [eis]
+# model = "L0-R0-(R1,CPE1)-(R2,CPE2)"
+# summary_params = ["R0.r"]
 
 # --- CV analysis parameters ---
 # [cv]
@@ -425,13 +467,12 @@ def _classify_eis(
 ) -> dict[str, list[Path]]:
     """Tag EIS files, splitting them around the main cycling step.
 
-    Files pinned by `eis_tag_patterns` win; any remaining files are tagged in
-    filename order if pins exist, otherwise by :func:`_eis_order_and_tags`.
+    Files pinned by `eis_tag_patterns` win; any remaining files are tagged by
+    :func:`_eis_order_and_tags`, with pinned standard tags counted in the layout.
     """
     result: dict[str, list[Path]] = {}
     pinned: set[Path] = set()
-    for tag in EIS_TAGS:
-        patterns = config.eis_tag_patterns.get(tag)
+    for tag, patterns in config.eis_tag_patterns.items():
         if not patterns:
             continue
         matches = sorted(_glob_many(folder, patterns, config.extensions))
@@ -451,12 +492,8 @@ def _classify_eis(
     if not free_files:
         return result
 
-    # With pins in play, the remaining files just fill whatever tags are left over.
-    if pinned:
-        ordered = free_files
-        tags = [tag for tag in EIS_TAGS if f"eis_{tag}" not in result]
-    else:
-        ordered, tags = _eis_order_and_tags(free_files, gcpl_file, warn=warn)
+    taken = {tag for tag in EIS_TAGS if f"eis_{tag}" in result}
+    ordered, tags = _eis_order_and_tags(free_files, gcpl_file, taken=taken, warn=warn)
     for tag, f in zip(tags, ordered, strict=False):
         result[f"eis_{tag}"] = [f]
     return result
@@ -510,31 +547,42 @@ def _eis_sort_keys(
 
 
 def _eis_order_and_tags(
-    eis_files: list[Path], gcpl_file: Path | None, *, warn: bool
+    eis_files: list[Path],
+    gcpl_file: Path | None,
+    *,
+    taken: set[str] | None = None,
+    warn: bool,
 ) -> tuple[list[Path], list[str]]:
     """Order EIS files by when they ran and tag them by the protocol's layout.
 
     Two before and two after cycling is the standard protocol (0% and 50% SOC, each
-    side); one before and one after is the early protocol (0% SOC either side). Any
-    other layout can't be mapped onto the SOC-specific tags, so files get numbered
-    `pre_N`/`post_N` tags instead. Falls back to filename order when neither step
-    numbers nor timestamps are readable.
+    side); one before and one after is the early protocol (0% SOC either side).
+    Standard tags in `taken` are already pinned to other files: they count towards
+    the layout, and `eis_files` fill the rest. Any other layout can't be mapped onto
+    the SOC-specific tags, so files get numbered `pre_N`/`post_N` tags instead.
+    Falls back to filename order when neither step numbers nor timestamps are readable.
     """
+    taken = taken or set()
     keys, gcpl_key = _eis_sort_keys(eis_files, gcpl_file)
     if keys is None or gcpl_key is None:
         if warn:
             logger.warning(
                 "Cannot tell which EIS files are before/after cycling, tagging in filename order"
             )
-        return eis_files, EIS_TAGS
+        return eis_files, [tag for tag in EIS_TAGS if tag not in taken]
 
     ordered = [f for _, f in sorted(zip(keys, eis_files, strict=True))]
     before = [key for key in keys if key < gcpl_key]
     after = [key for key in keys if key >= gcpl_key]
-    if len(before) == 2 and len(after) == 2:
-        return ordered, EIS_TAGS
-    if len(before) == 1 and len(after) == 1:
-        return ordered, ["pre", "post"]
+    n_pre_taken = sum(tag.startswith("pre") for tag in taken)
+    n_post_taken = len(taken) - n_pre_taken
+    layout = _EIS_LAYOUTS.get((len(before) + n_pre_taken, len(after) + n_post_taken))
+    if layout:
+        pre_tags = [tag for tag in layout[0] if tag not in taken]
+        post_tags = [tag for tag in layout[1] if tag not in taken]
+        # A pinned tag outside the layout, e.g. pre-50%SOC in the early protocol, won't fit
+        if len(pre_tags) == len(before) and len(post_tags) == len(after):
+            return ordered, pre_tags + post_tags
 
     if warn:
         logger.warning(
