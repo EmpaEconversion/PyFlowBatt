@@ -782,12 +782,10 @@ def analyse_sample(
     # Standard tags always get rows so combined summaries line up, other tags follow
     eis_tags = [*EIS_TAGS, *(tag for tag in eis_res if tag not in EIS_TAGS)]
     eis_rows = {}
-    for param in config.eis_summary_params:
-        if param not in eis_units:
-            continue
+    for param, unit in eis.summary_units(config.eis_summary_params).items():
         for tag in eis_tags:
             fit = eis_res.get(tag, {}).get(param, {})
-            label = eis.summary_label(param, tag, eis_units[param])
+            label = eis.summary_label(param, tag, unit)
             eis_rows[label] = {"Value": fit.get("value"), "Error": fit.get("err")}
 
     # Create keys

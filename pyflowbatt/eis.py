@@ -15,7 +15,6 @@ from matplotlib.figure import Figure
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "L0-R0-(R1,CPE1)-(R2,CPE2)"
-DEFAULT_SUMMARY_PARAMS = ["R0.r"]
 MODELS_URL = "https://empaeconversion.github.io/fasteis/models/"
 
 # fasteis unit strings -> units for summary row labels
@@ -36,6 +35,33 @@ PRETTY_UNITS: dict[str, str] = {
 def summary_label(param: str, tag: str, unit: str) -> str:
     """Summary sheet row label for one fit parameter of one tagged EIS measurement."""
     return f"EIS {param} {tag} / {PRETTY_UNITS.get(unit, unit)}"
+
+
+def summary_units(summary_params: list[str]) -> dict[str, str]:
+    """Units of each summary parameter.
+
+    Looks up element in fasteis, so summary rows exist even if the full model is invalid or there
+    are no EIS files. Names that aren't a fasteis element parameter are warned about and dropped.
+    """
+    import fasteis  # noqa: PLC0415
+
+    units = {}
+    for param in summary_params:
+        try:
+            circuit = fasteis.Circuit(param.split(".")[0])
+            element_units = dict(zip(circuit.param_names(), circuit.param_units(), strict=True))
+        except ValueError:
+            element_units = {}
+        if param in element_units:
+            units[param] = element_units[param]
+        else:
+            logger.warning(
+                "- EIS summary parameter %s is not a fasteis parameter name, so it is left out "
+                "of the summary. Use names like R0.r or CPE1.alpha, see %s",
+                param,
+                MODELS_URL,
+            )
+    return units
 
 
 def check_model(model: str, summary_params: list[str]) -> tuple[dict[str, str], bool]:
