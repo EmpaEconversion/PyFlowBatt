@@ -1,6 +1,7 @@
 """Tests for pyflowbatt.toml configuration and technique file classification."""
 
 import json
+import re
 import zipfile
 from pathlib import Path
 
@@ -1678,3 +1679,232 @@ def test_custom_eis_tag_descriptions() -> None:
     standard = analysis_module.OUTPUT_PLOT_DESCRIPTIONS["eis_pre"]
     assert analysis_module.plot_description("eis_pre") == standard
     assert "measurement 2" in analysis_module.plot_description("eis_post_2")
+
+
+def test_eis_summary_units_from_element(caplog: pytest.LogCaptureFixture) -> None:
+    """Summary units come from each parameter's own element, dropping unknown names."""
+    from pyflowbatt import eis
+
+    with caplog.at_level("WARNING", logger="pyflowbatt.eis"):
+        units = eis.summary_units(["R0.r", "CPE1.alpha", "Wo3.tau", "Missing.x", "R0.x"])
+    assert units == {"R0.r": "ohm", "CPE1.alpha": "-", "Wo3.tau": "s"}
+    messages = [r.getMessage() for r in caplog.records]
+    assert len(messages) == 2
+    assert "Missing.x" in messages[0]
+    assert "R0.x" in messages[1]
+
+
+def test_analyse_sample_summary_has_eis_rows_without_eis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without EIS files or a valid model, the standard EIS rows are still in the summary."""
+    import pandas as pd
+
+    from pyflowbatt import analysis as analysis_module
+
+    sample = _write_two_eis_sample(tmp_path / "sample")
+    for f in sample.glob("*_PEIS_*"):
+        f.unlink()
+    (sample / "pyflowbatt.toml").write_text('[eis]\nmodel = "R0-(R1"\n')
+    monkeypatch.setattr(analysis_module, "read_to_bdf", lambda _f: pd.DataFrame({"x": [0]}))
+    monkeypatch.setattr(analysis_module, "df_save_bdf", lambda *_a, **_k: None)
+
+    config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
+    analysis_module.analyse_sample(sample, save_format=None, config=config)
+
+    df = pd.read_excel(sample / "results" / "summary.xlsx", sheet_name="Summary", index_col=0)
+    eis_rows = [q for q in df.index if q.startswith("EIS")]
+    assert eis_rows == [
+        "EIS R0.r pre / Ω",
+        "EIS R0.r pre-50%SOC / Ω",
+        "EIS R0.r post-50%SOC / Ω",
+        "EIS R0.r post / Ω",
+    ]
+    assert df.loc[eis_rows, "Value"].isna().all()
+
+
+def test_merge_summaries_keeps_missing_rows_in_place(tmp_path: Path) -> None:
+    """Rows only some samples have go after their neighbour, not at the bottom."""
+    import pandas as pd
+
+    from pyflowbatt.analysis import merge_summaries
+
+    rows_by_sample = {
+        "a": ["OCV", "EIS R0.r pre", "EIS R0.r post", "1st CE"],
+        "b": ["OCV", "EIS R0.r pre", "EIS R0.r post", "EIS R0.r pre-20%SOC", "1st CE", "Extra"],
+        "c": ["New first", "OCV", "1st CE"],
+    }
+    paths = []
+    for name, rows in rows_by_sample.items():
+        path = tmp_path / name / "results" / "summary.xlsx"
+        path.parent.mkdir(parents=True)
+        df = pd.DataFrame({"Value": range(len(rows)), "Error": None}, index=rows)
+        df.to_excel(path, sheet_name="Summary")
+        paths.append(path)
+
+    df = merge_summaries(paths, {tmp_path / name: name for name in rows_by_sample})
+
+    assert list(df["Quantity"]) == [
+        "New first",
+        "OCV",
+        "EIS R0.r pre",
+        "EIS R0.r post",
+        "EIS R0.r pre-20%SOC",
+        "1st CE",
+        "Extra",
+    ]
+    assert df.set_index("Quantity").loc["EIS R0.r pre-20%SOC", "b"] == 3
+    assert pd.isna(df.set_index("Quantity").loc["EIS R0.r pre-20%SOC", "a"])
+
+
+@pytest.mark.parametrize(
+    ("rel_path", "frequency_domain"),
+    [
+        ("s/results/eis_pre.bdf.parquet", True),
+        ("s/results/eis_pre-20%SOC.bdf.csv", True),
+        ("s/results/s.bdf.parquet", False),
+        ("weis_sample/results/weis_sample.bdf.csv", False),
+    ],
+)
+def test_battinfo_eis_data_comment(rel_path: str, frequency_domain: bool) -> None:
+    """BDF outputs from EIS are described as frequency-domain, others as time series."""
+    from pyflowbatt.battinfo import add_data
+
+    comment = add_data(rel_path, None)["hasOutput"]["dcat:distribution"]["rdfs:comment"]
+    assert comment.startswith("Frequency-domain" if frequency_domain else "Time series")
+
+
+def test_template_every_single_hash_line_uncomments_to_valid_toml(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Explanations use ##, and deleting the # from every other line gives a valid config."""
+    from pyflowbatt.config import TEMPLATE_TOML
+
+    lines = TEMPLATE_TOML.splitlines()
+    assert all(not line or line.startswith(("##", "# ")) for line in lines)
+    uncommented = [line.removeprefix("# ") for line in lines]
+    sample_dir = tmp_path / "sample"
+    sample_dir.mkdir()
+    (sample_dir / "pyflowbatt.toml").write_text("\n".join(uncommented), encoding="utf-8")
+
+    with caplog.at_level("WARNING", logger="pyflowbatt"):
+        config = PyFlowBattConfig.load(sample_dir, home=tmp_path / "home")
+    assert caplog.records == []
+    assert config.eis_model == "L0-R0-(R1,CPE1)-(R2,CPE2)"
+    assert config.cv_v_max == 0.6
+
+
+def test_bad_toml_error_names_file_and_line(tmp_path: Path) -> None:
+    """An uncommented explanation line raises ConfigError with the file, line and a hint."""
+    from pyflowbatt.config import ConfigError
+
+    sample_dir = tmp_path / "sample"
+    sample_dir.mkdir()
+    toml = sample_dir / "pyflowbatt.toml"
+    toml.write_text(
+        "## --- Electrode area ---\narea_cm2 = 3\n\n"
+        "--- LSV pre/post split: file numbers below this are pre ---\nlsv_threshold = 8\n"
+    )
+
+    with pytest.raises(ConfigError) as excinfo:
+        PyFlowBattConfig.load(sample_dir, home=tmp_path / "home")
+    message = str(excinfo.value)
+    assert str(toml) in message
+    assert "line 4: --- LSV pre/post split" in message
+    assert "put the # back" in message
+
+
+@pytest.mark.parametrize(
+    ("toml_text", "hint"),
+    [
+        ('## Standard tags:\nStandard tags: "pre", "post".\n', "explanation line"),
+        ('model = "R0"\n# [cv]\neis = ["*_x_*"]\n[eis]\n', "deleted the # in front"),
+        ("area_cm2 = 5\narea_cm2 = 6\n", "set twice"),
+        ('sample_name_pattern = "^\\d+$"\n', "Use single quotes"),
+        ('model = "R0\n', "missing its closing quote"),
+        ('summary_params = ["R0.r", "R1.r"\n', "missing its closing ]"),
+        ("model = L0-R0\n", "Text values need quotes"),
+        ("lsv_threshold = True\n", "true/false are lowercase"),
+        ("area_cm2 = 5 cm2\n", "no units"),
+        ('[eis\nmodel = "R0"\n', "Section lines look like [eis]"),
+        ("area cm2 = 5\n", "can't contain spaces"),
+        ("x = {a = 1\n", "Only delete the single #"),
+    ],
+)
+def test_bad_toml_hint_matches_mistake(tmp_path: Path, toml_text: str, hint: str) -> None:
+    """Each kind of TOML mistake gets a hint about its likely cause."""
+    from pyflowbatt.config import ConfigError
+
+    sample_dir = tmp_path / "sample"
+    sample_dir.mkdir()
+    (sample_dir / "pyflowbatt.toml").write_text(toml_text)
+
+    with pytest.raises(ConfigError, match=re.escape(hint)):
+        PyFlowBattConfig.load(sample_dir, home=tmp_path / "home")
+
+
+def test_toml_with_bom_loads(tmp_path: Path) -> None:
+    """A UTF-8 file with a byte order mark, as some Windows editors save, still loads."""
+    sample_dir = tmp_path / "sample"
+    sample_dir.mkdir()
+    (sample_dir / "pyflowbatt.toml").write_bytes(b"\xef\xbb\xbfarea_cm2 = 3\n")
+
+    assert PyFlowBattConfig.load(sample_dir, home=tmp_path / "home").area_cm2 == 3
+
+
+@pytest.mark.parametrize(
+    ("toml_text", "expected"),
+    [
+        (
+            '# [eis]\nmodel = "R0"\n',
+            "Ignoring model at the top level ({path}, line 2): it belongs under [eis]",
+        ),
+        (
+            '[eis]\nmodel = "R0"\n\n# [cv]\nv_min = 0.1\n',
+            "Ignoring v_min in [eis] ({path}, line 5): it belongs under [cv]",
+        ),
+        (
+            "[cv]\nmin_r2 = 0.5\narea_cm2 = 3\n",
+            "Ignoring area_cm2 in [cv] ({path}, line 3): it is a top-level setting",
+        ),
+        (
+            '[eis_tags]\n"pre" = ["*_02_*"]\n# [eis]\nsummary_params = ["R1.r"]\n',
+            "Ignoring summary_params in [eis_tags] ({path}, line 4): it belongs under [eis]",
+        ),
+        ("area_cm = 3\n", "({path}, line 1): unknown setting, did you mean area_cm2?"),
+        ('[eiss]\nmodel = "R0"\n', "({path}, line 1): unknown section, did you mean [eis]?"),
+        ("cv = 5\n", "({path}, line 1): cv is a section, so write it as a [cv] line"),
+    ],
+)
+def test_misplaced_setting_warns_with_line(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, toml_text: str, expected: str
+) -> None:
+    """A setting outside its section is ignored with a warning naming its line and section."""
+    sample_dir = tmp_path / "sample"
+    sample_dir.mkdir()
+    toml = sample_dir / "pyflowbatt.toml"
+    toml.write_text(toml_text)
+
+    with caplog.at_level("WARNING", logger="pyflowbatt"):
+        config = PyFlowBattConfig.load(sample_dir, home=tmp_path / "home")
+
+    assert [r.getMessage() for r in caplog.records if expected.format(path=toml) in r.getMessage()]
+    assert config.area_cm2 is None
+    assert config.cv_v_min == 0.4004
+    assert config.eis_summary_params == ["R0.r"]
+    assert config.eis_tag_patterns in ({}, {"pre": ["*_02_*"]})
+
+
+def test_eis_tags_any_name_not_warned_as_misplaced(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Custom tag names under [eis_tags] are not reported as unknown settings."""
+    sample_dir = tmp_path / "sample"
+    sample_dir.mkdir()
+    (sample_dir / "pyflowbatt.toml").write_text('[eis_tags]\n"pre-20%SOC" = ["*_03_*"]\n')
+
+    with caplog.at_level("WARNING", logger="pyflowbatt"):
+        config = PyFlowBattConfig.load(sample_dir, home=tmp_path / "home")
+
+    assert caplog.records == []
+    assert config.eis_tag_patterns == {"pre-20%SOC": ["*_03_*"]}
