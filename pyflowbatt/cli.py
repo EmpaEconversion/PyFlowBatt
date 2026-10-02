@@ -4,7 +4,7 @@ import argparse
 import logging
 from pathlib import Path
 
-from pyflowbatt.config import CONFIG_FILENAME, write_template_config
+from pyflowbatt.config import CONFIG_FILENAME, ConfigError, write_template_config
 
 
 def init_config(folder: str | None = None) -> None:
@@ -43,20 +43,17 @@ def analyse(
     if not folderpath.is_dir():
         logger.error("%s is not a directory", folderpath)
         return
-    if dry:
-        dry_analyse_all_samples(
+    run = dry_analyse_all_samples if dry else analyse_all_samples
+    try:
+        run(
             folderpath,
             max_folder_searches=max_folder_searches,
             max_search_depth=max_search_depth,
             zip_output=zip_output,
         )
-    else:
-        analyse_all_samples(
-            folderpath,
-            max_folder_searches=max_folder_searches,
-            max_search_depth=max_search_depth,
-            zip_output=zip_output,
-        )
+    except ConfigError as e:
+        # The message names the file and line, a traceback would only hide it
+        logger.error("%s", e)  # noqa: TRY400
 
 
 def main() -> None:
