@@ -1079,6 +1079,18 @@ def find_all_sample_summaries(
     ]
 
 
+def _merged_row_order(indexes: list[pd.Index]) -> list[str]:
+    """All row labels, each label missing from earlier summaries placed after its predecessor."""
+    order: list[str] = []
+    for index in indexes:
+        prev = None
+        for label in index:
+            if label not in order:
+                order.insert(order.index(prev) + 1 if prev is not None else 0, label)
+            prev = label
+    return order
+
+
 def merge_summaries(
     summary_xlsxs: list[str | Path],
     sample_ids_by_sample_folder: dict[Path, str] | None = None,
@@ -1098,7 +1110,7 @@ def merge_summaries(
     dfs = [df["Value"] for df in dfs]
     for name, df in zip(names, dfs, strict=True):
         df.name = name
-    df = pd.concat(dfs, axis=1)
+    df = pd.concat(dfs, axis=1).reindex(_merged_row_order([df.index for df in dfs]))
     vals = df.copy()
 
     df["Average"] = vals.mean(axis=1)
