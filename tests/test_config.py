@@ -556,12 +556,15 @@ def test_media_types_agree_between_crate_and_battinfo(
     }
     metadata_path = sample / "metadata.empa__fcid000001.json"
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    battinfo_types = {
-        d["@id"]: d["dcat:mediaType"]
+    iana = "http://www.iana.org/assignments/media-types/"
+    battinfo_iris = [
+        (d["@id"], d["dcat:mediaType"]["@id"])
         for section in ("hasOutput", "hasInput")
         for d in metadata[section]["dcat:distribution"]
         if d.get("dcat:mediaType")
-    }
+    ]
+    assert all(iri.startswith(iana) for _, iri in battinfo_iris)
+    battinfo_types = {file_id: iri.removeprefix(iana) for file_id, iri in battinfo_iris}
 
     assert crate_types["sample/sample_02_PEIS_A.mpr"] == "application/octet-stream"
     assert crate_types["sample/sample_protocol.mps"] == "text/plain"
@@ -733,12 +736,12 @@ def _fake_convert(_file: Path) -> dict:
 
 
 def _all_download_urls(obj: object) -> set[str]:
-    """Recursively collect every "dcat:downloadURL" string value."""
+    """Recursively collect every "dcat:downloadURL" IRI."""
     found: set[str] = set()
     if isinstance(obj, dict):
         url_value = obj.get("dcat:downloadURL")
-        if isinstance(url_value, str):
-            found.add(url_value)
+        if isinstance(url_value, dict):
+            found.add(url_value["@id"])
         for v in obj.values():
             found |= _all_download_urls(v)
     elif isinstance(obj, list):
@@ -1772,6 +1775,32 @@ def test_battinfo_eis_data_comment(rel_path: str, frequency_domain: bool) -> Non
 
     comment = add_data(rel_path, None)["hasOutput"]["dcat:distribution"]["rdfs:comment"]
     assert comment.startswith("Frequency-domain" if frequency_domain else "Time series")
+
+
+def test_battinfo_distribution_values_are_iris() -> None:
+    """mediaType, tableSchema, and downloadURL are IRIs."""
+    from rdflib import Graph, Namespace, URIRef
+
+    from pyflowbatt.battinfo import add_data
+
+    dcat = Namespace("http://www.w3.org/ns/dcat#")
+    csvw = Namespace("http://www.w3.org/ns/csvw#")
+    dist = add_data("s/results/gcpl.bdf.csv", "https://doi.org/10.5281/zenodo.12345678")
+    doc = {
+        "@context": {"@base": "https://example.org/", "dcat": str(dcat), "csvw": str(csvw)},
+        **dist["hasOutput"]["dcat:distribution"],
+    }
+    graph = Graph().parse(data=json.dumps(doc), format="json-ld")
+    file = URIRef("https://example.org/s/results/gcpl.bdf.csv")
+
+    media_type = graph.value(file, dcat.mediaType)
+    assert media_type == URIRef("http://www.iana.org/assignments/media-types/text/csv")
+    assert graph.value(file, csvw.tableSchema) == URIRef(
+        "https://w3id.org/battery-data-alliance/ontology/battery-data-format/schema"
+    )
+    download_url = graph.value(file, dcat.downloadURL)
+    assert isinstance(download_url, URIRef)
+    assert str(download_url).startswith("https://zenodo.org/")
 
 
 def test_template_every_single_hash_line_uncomments_to_valid_toml(

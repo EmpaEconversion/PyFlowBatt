@@ -17,6 +17,15 @@ from pyflowbatt.version import __title__, __url__, __version__
 
 logger = logging.getLogger(__name__)
 
+BDF_SCHEMA_IRI = "https://w3id.org/battery-data-alliance/ontology/battery-data-format/schema"
+# DCAT expects dcat:mediaType values from the IANA register, as IRIs in this form
+IANA_MEDIA_TYPES = "http://www.iana.org/assignments/media-types/"
+
+
+def _media_type_node(rel_file_path: str) -> dict[str, str]:
+    """IANA media type IRI of a file, as a JSON-LD node reference."""
+    return {"@id": IANA_MEDIA_TYPES + media_type(rel_file_path)}
+
 
 blank_flow_cell = {
     "@context": [
@@ -555,13 +564,13 @@ def add_input_data(
     dist: dict = {
         "@id": quote(rel_file_path),
         "@type": "dcat:Distribution",
-        "dcat:mediaType": media_type(rel_file_path),
+        "dcat:mediaType": _media_type_node(rel_file_path),
     }
     download_url = zenodo_download_url(
         rel_file_path, zenodo_doi_url, package=package, zip_filename=zip_filename
     )
     if download_url:
-        dist["dcat:downloadURL"] = download_url
+        dist["dcat:downloadURL"] = {"@id": download_url}
     if comment:
         dist["rdfs:comment"] = comment
 
@@ -599,7 +608,7 @@ def add_data(
     extras = extras or {}
     if rel_file_path.endswith(".parquet"):
         additions: dict[str, str | list | dict] = {
-            "csvw:tableSchema": "https://w3id.org/battery-data-alliance/ontology/battery-data-format/schema",
+            "csvw:tableSchema": {"@id": BDF_SCHEMA_IRI},
             "rdfs:comment": "Time series electrochemical data using Battery Data Format (bdf) columns",
         }
         if Path(rel_file_path).name.startswith("eis_"):
@@ -608,7 +617,7 @@ def add_data(
             )
     elif rel_file_path.endswith(".csv"):
         additions = {
-            "csvw:tableSchema": "https://w3id.org/battery-data-alliance/ontology/battery-data-format/schema",
+            "csvw:tableSchema": {"@id": BDF_SCHEMA_IRI},
             "csvw:dialect": {"@type": "csvw:Dialect", "csvw:delimiter": ",", "csvw:skipRows": 0},
             "rdfs:comment": "Time series electrochemical data using Battery Data Format (bdf) columns",
         }
@@ -636,7 +645,7 @@ def add_data(
     dist: dict = {
         "@id": quote(rel_file_path),
         "@type": "dcat:Distribution",
-        "dcat:mediaType": media_type(rel_file_path),
+        "dcat:mediaType": _media_type_node(rel_file_path),
         **additions,
         **extras,
     }
@@ -644,7 +653,7 @@ def add_data(
         rel_file_path, zenodo_doi_url, package=package, zip_filename=zip_filename
     )
     if download_url:
-        dist["dcat:downloadURL"] = download_url
+        dist["dcat:downloadURL"] = {"@id": download_url}
 
     return {
         "@type": "BatteryTest",
