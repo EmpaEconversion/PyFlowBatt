@@ -1,10 +1,12 @@
 """Tests for the PyFlowBatt CLI, in particular `pyflowbatt init`."""
 
+import zipfile
 from pathlib import Path
 
 import pytest
 
 from pyflowbatt import cli
+from pyflowbatt.analysis import zip_folder
 
 
 def test_init_config_writes_template(tmp_path: Path) -> None:
@@ -74,7 +76,12 @@ def test_main_default_behavior_unchanged(monkeypatch: pytest.MonkeyPatch) -> Non
 
     cli.main()
 
-    assert called_with == {"folder": "somefolder", "dry": True, "zip_output": False}
+    assert called_with == {
+        "folder": "somefolder",
+        "dry": True,
+        "zip_output": False,
+        "verbose": False,
+    }
 
 
 def test_main_zip_flag_dispatches_zip_output_true(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -89,7 +96,12 @@ def test_main_zip_flag_dispatches_zip_output_true(monkeypatch: pytest.MonkeyPatc
 
     cli.main()
 
-    assert called_with == {"folder": "somefolder", "dry": False, "zip_output": True}
+    assert called_with == {
+        "folder": "somefolder",
+        "dry": False,
+        "zip_output": True,
+        "verbose": False,
+    }
 
 
 def test_analyse_bad_toml_logs_error(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
@@ -100,3 +112,35 @@ def test_analyse_bad_toml_logs_error(tmp_path: Path, caplog: pytest.LogCaptureFi
         cli.analyse(folder=str(tmp_path))
 
     assert "line 1: --- Electrode area ---" in caplog.text
+
+
+def test_analyse_writes_log_file(tmp_path: Path) -> None:
+    """A real run writes all logs to pyflowbatt.log."""
+    cli.analyse(folder=str(tmp_path))
+    log = (tmp_path / "pyflowbatt.log").read_text(encoding="utf-8")
+    assert "No sample folders found" in log
+
+
+def test_dry_run_writes_no_log_file(tmp_path: Path) -> None:
+    """Dry runs do not change files."""
+    cli.analyse(folder=str(tmp_path), dry=True)
+    assert not (tmp_path / "pyflowbatt.log").exists()
+
+
+def test_zip_skips_log_file(tmp_path: Path) -> None:
+    """The log is not included with the zip."""
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "data.csv").write_text("x")
+    (root / "pyflowbatt.log").write_text("log")
+    with zipfile.ZipFile(zip_folder(root, tmp_path / "out.zip")) as zf:
+        assert zf.namelist() == ["data.csv"]
+
+
+@pytest.mark.parametrize("verbose", [False, True])
+def test_log_file_has_debug_only_when_verbose(tmp_path: Path, *, verbose: bool) -> None:
+    """Debug records reach pyflowbatt.log only with --verbose."""
+    (tmp_path / "pyflowbatt.toml").write_text("")
+    cli.analyse(folder=str(tmp_path), verbose=verbose)
+    log = (tmp_path / "pyflowbatt.log").read_text(encoding="utf-8")
+    assert ("Loading PyFlowBatt config from" in log) is verbose
