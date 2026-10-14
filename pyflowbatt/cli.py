@@ -36,7 +36,7 @@ def _console_logging(
     for handler in handlers:
         root.addHandler(handler)
     previous_level = logger.level
-    logger.setLevel(logging.DEBUG if verbose or log_path else logging.INFO)
+    logger.setLevel(logging.DEBUG if verbose else logging.INFO)
     logging.captureWarnings(True)  # noqa: FBT003
     try:
         yield

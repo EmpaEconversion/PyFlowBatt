@@ -534,7 +534,7 @@ def analyse_sample(
     config = config or PyFlowBattConfig.load(folder)
     reporter = reporter or Reporter()
 
-    logger.debug("Analysing %s", folder.name)
+    logger.info("Analysing %s", folder.name)
     classified = classify_technique_files(folder, config, warn=True)
     gcpl_files = classified.get("gcpl", [])
     gcpl_file = gcpl_files[0] if gcpl_files else None
