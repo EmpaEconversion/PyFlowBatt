@@ -90,3 +90,13 @@ def test_main_zip_flag_dispatches_zip_output_true(monkeypatch: pytest.MonkeyPatc
     cli.main()
 
     assert called_with == {"folder": "somefolder", "dry": False, "zip_output": True}
+
+
+def test_analyse_bad_toml_logs_error(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """A broken pyflowbatt.toml is reported as one error message, not a traceback."""
+    (tmp_path / "pyflowbatt.toml").write_text("--- Electrode area ---\n")
+
+    with caplog.at_level("ERROR", logger="pyflowbatt"):
+        cli.analyse(folder=str(tmp_path))
+
+    assert "line 1: --- Electrode area ---" in caplog.text

@@ -602,7 +602,7 @@ def add_data(
             "csvw:tableSchema": "https://w3id.org/battery-data-alliance/ontology/battery-data-format/schema",
             "rdfs:comment": "Time series electrochemical data using Battery Data Format (bdf) columns",
         }
-        if "eis." in rel_file_path:
+        if Path(rel_file_path).name.startswith("eis_"):
             additions["rdfs:comment"] = (
                 "Frequency-domain electrochemical data using Battery Data Format (bdf) columns"
             )
@@ -612,7 +612,7 @@ def add_data(
             "csvw:dialect": {"@type": "csvw:Dialect", "csvw:delimiter": ",", "csvw:skipRows": 0},
             "rdfs:comment": "Time series electrochemical data using Battery Data Format (bdf) columns",
         }
-        if "eis" in rel_file_path:
+        if Path(rel_file_path).name.startswith("eis_"):
             additions["rdfs:comment"] = (
                 "Frequency-domain electrochemical data using Battery Data Format (bdf) columns"
             )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 import logging
 import re
 from dataclasses import dataclass, field
@@ -16,9 +17,96 @@ logger = logging.getLogger(__name__)
 
 CONFIG_FILENAME = "pyflowbatt.toml"
 EIS_TAGS = ["pre", "pre-50%SOC", "post-50%SOC", "post"]
+# Standard protocol layouts, keyed by (EIS count before, after cycling), in time order
+_EIS_LAYOUTS: dict[tuple[int, int], tuple[list[str], list[str]]] = {
+    (2, 2): (["pre", "pre-50%SOC"], ["post-50%SOC", "post"]),
+    (1, 1): (["pre"], ["post"]),
+}
 DEFAULT_AREA_CM2 = 5.0  # fallback electrode area (cm^2) when no toml or BattINFO value exists
 _LSV_NUMBER_RE = re.compile(r"_(\d+)_LSV_")
 _STEP_NUMBER_RE = re.compile(r"_(\d+)_[A-Za-z]")
+_EIS_TAG_RE = re.compile(r"^[A-Za-z0-9%.+-]+$")  # tags become part of output filenames
+
+# ------------ Warning/error messages for reading in settings files ---------- #
+
+_TOML_ERROR_LINE_RE = re.compile(r"at line (\d+)")
+_TOML_TABLE_RE = re.compile(r"^\s*\[\s*([^\]]+?)\s*\]")
+_TOML_KEY_RE = re.compile(r"""^\s*["']?([^"'=\s]+)["']?\s*=""")
+
+
+class ConfigError(ValueError):
+    """A pyflowbatt.toml file that cannot be read."""
+
+
+def _read_toml(path: Path) -> tuple[dict, str]:
+    """Parse a config file into data and text, raising ConfigError naming the bad line."""
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except UnicodeDecodeError as e:
+        msg = f"Cannot read {path}: not saved as UTF-8 text ({e})"
+        raise ConfigError(msg) from e
+    try:
+        return tomllib.loads(text), text
+    except tomllib.TOMLDecodeError as e:
+        msg = f"Cannot read {path}: {e}"
+        lines = text.splitlines()
+        line = None
+        if (match := _TOML_ERROR_LINE_RE.search(str(e))) and int(match.group(1)) <= len(lines):
+            lineno = int(match.group(1))
+            line = lines[lineno - 1].strip()
+            msg += f"\n  line {lineno}: {line}"
+        msg += f"\n{_toml_error_hint(str(e), line)}"
+        raise ConfigError(msg) from e
+
+
+# tomllib error message fragment -> likely cause, checked in order
+_TOML_ERROR_HINTS: list[tuple[str, str]] = [
+    (
+        "twice",
+        "A [section] appears twice, or a setting with the same name sits above it. "
+        "Check that you deleted the # in front of the [section] line above each setting you use, "
+        "and that each [section] appears once.",
+    ),
+    ("Cannot overwrite a value", "This setting is set twice in this file: keep only one."),
+    (
+        "Unescaped '\\'",
+        "A \\ inside double quotes starts an escape code. Use single quotes for text with "
+        "backslashes, such as regexes and Windows paths, e.g. '^\\d+_.+$'.",
+    ),
+    ("Illegal character '\\n'", "A text value is missing its closing quote."),
+    ("Unclosed array", "A list is missing its closing ], or a comma between items."),
+    (
+        "Invalid value",
+        'Text values need quotes, e.g. model = "R0-(R1,CPE1)". Lists use [ ], '
+        "true/false are lowercase, and numbers have no units.",
+    ),
+    (
+        "Expected newline or end of document",
+        "Only put one value after the =, with no units, e.g. area_cm2 = 5 not 5 cm2. "
+        "A note after a value needs a # in front of it.",
+    ),
+]
+
+
+def _toml_error_hint(error: str, line: str | None) -> str:
+    """Likely cause of a TOML parse error, from the error message and the offending line."""
+    for fragment, hint in _TOML_ERROR_HINTS:
+        if fragment in error:
+            return hint
+    if line is not None and line.startswith("["):
+        return "Section lines look like [eis], with nothing else on the line."
+    if line is not None and "=" not in line:
+        return (
+            "This looks like an explanation line (## in the template). Explanations must "
+            "stay commented: put the # back at the start of the line."
+        )
+    if "Expected '=' after a key" in error:
+        return "Setting names before the = can't contain spaces, e.g. area_cm2 = 5."
+    return (
+        "Only delete the single # in front of a setting or [section] line, and check its "
+        'value: text in quotes, lists in [ ], numbers bare, e.g. model = "R0-(R1,CPE1)".'
+    )
+
 
 _TECHNIQUE_KEYS: dict[str, str] = {
     "gcpl": "gcpl_patterns",
@@ -38,9 +126,89 @@ _CV_KEYS: dict[str, str] = {
 }
 
 
+# Settings allowed in each section, "" for the top level; [eis_tags] takes any tag name
+_SECTION_KEYS: dict[str, set[str]] = {
+    "": {
+        "sample_name",
+        "sample_name_pattern",
+        "extensions",
+        "extra_extensions",
+        "lsv_threshold",
+        "area_cm2",
+        "assembled_resistance_ohm",
+        "summary_n_cycles",
+    },
+    "extra_patterns": set(_TECHNIQUE_KEYS),
+    "eis_tags": set(),
+    "eis": {"model", "summary_params"},
+    "cv": set(_CV_KEYS),
+}
+
+
 def _is_number(value: object) -> bool:
     """Check if value is an int or float."""
     return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _section(data: dict, name: str) -> dict:
+    """Get the [name] table of a parsed config, empty if missing or not a table."""
+    table = data.get(name, {})
+    return table if isinstance(table, dict) else {}
+
+
+def _setting_section(key: str) -> str | None:
+    """Section a setting belongs in, "" for the top level, None if it isn't a setting."""
+    return next((section for section, keys in _SECTION_KEYS.items() if key in keys), None)
+
+
+def _misplaced_hint(key: str, home: str | None, *, is_table: bool) -> str:
+    """Explain where a setting found in the wrong place belongs."""
+    if is_table:
+        sections = [name for name in _SECTION_KEYS if name]
+        close = difflib.get_close_matches(key, sections, n=1)
+        return f"unknown section, did you mean [{close[0]}]?" if close else "unknown section"
+    if home is None and key in _SECTION_KEYS:
+        return f"{key} is a section, so write it as a [{key}] line with its settings below"
+    if home is None:
+        close = difflib.get_close_matches(key, set().union(*_SECTION_KEYS.values()), n=1)
+        return f"unknown setting, did you mean {close[0]}?" if close else "unknown setting"
+    if home == "":
+        return "it is a top-level setting, so move it above the first [section] line"
+    return (
+        f"it belongs under [{home}], so delete the # in front of the [{home}] line "
+        f"above it, or move it there"
+    )
+
+
+def _key_line(text: str, section: str, key: str) -> int | None:
+    """Line number of a key in a [section] ("" for the top level), or of a [key] line."""
+    current = ""
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        if match := _TOML_TABLE_RE.match(line):
+            current = match.group(1).strip("\"'")
+            if section == "" and current == key:
+                return lineno
+        elif current == section and (match := _TOML_KEY_RE.match(line)) and match.group(1) == key:
+            return lineno
+    return None
+
+
+def _warn_misplaced_settings(data: dict, text: str, path: Path) -> None:
+    """Warn about unknown settings and settings in the wrong section, saying where they belong."""
+    tables = {"": data} | {name: _section(data, name) for name in _SECTION_KEYS if name}
+    for section, table in tables.items():
+        where = f"in [{section}]" if section else "at the top level"
+        for key, value in table.items():
+            home = _setting_section(key)
+            is_table = section == "" and isinstance(value, dict)
+            if (is_table and key in _SECTION_KEYS) or home == section:
+                continue
+            if section == "eis_tags" and home is None:
+                continue
+            hint = _misplaced_hint(key, home, is_table=is_table)
+            lineno = _key_line(text, section, key)
+            location = f"{path}, line {lineno}" if lineno else str(path)
+            logger.warning("Ignoring %s %s (%s): %s", key, where, location, hint)
 
 
 @dataclass
@@ -66,9 +234,14 @@ class PyFlowBattConfig:
         eis  = ["*_EIS_*"]    # adds to the built-in *_PEIS_*
         gcpl = ["*_GCD_*"]
 
-        [eis_tags]            # pin EIS files to tags instead of filename order
+        [eis_tags]            # pin EIS files to tags, any name, instead of by layout
         "pre"  = ["*_02_PEIS_*"]
+        "pre-20%SOC" = ["*_03_PEIS_*"]
         "post" = ["*_06_PEIS_*"]
+
+        [eis]
+        model = "L0-R0-(R1,CPE1)-(R2,CPE2)"  # any fasteis circuit string
+        summary_params = ["R0.r", "R1.r"]    # fit parameters reported in the summary
 
         [cv]
         v_min = 0.4     # voltage window used to plot
@@ -96,8 +269,10 @@ class PyFlowBattConfig:
     cv_post_patterns: list[str] = field(default_factory=lambda: ["*_CVApost*", "*_CVpost*"])
     eis_patterns: list[str] = field(default_factory=lambda: ["*_PEIS_*"])
     extensions: list[str] = field(default_factory=lambda: [".mpr"])
-    # EIS tag -> glob patterns; tags not listed are assigned in filename order
+    # EIS tag -> glob patterns; unpinned files are tagged by protocol layout
     eis_tag_patterns: dict[str, list[str]] = field(default_factory=dict)
+    eis_model: str = "L0-R0-(R1,CPE1)-(R2,CPE2)"  # fasteis circuit string fitted to EIS
+    eis_summary_params: list[str] = field(default_factory=lambda: ["R0.r"])
     sample_name_pattern: str = r"^\d+_.+_.+$"
     sample_name: str | None = None  # overrides pattern entirely
     lsv_threshold: int = 8  # numeric cutoff for pre/post when only one LSV file is found
@@ -159,10 +334,10 @@ class PyFlowBattConfig:
 
     def _apply_toml(self, path: Path) -> None:
         """Merge a single TOML config file into this config (mutates in place)."""
-        with path.open("rb") as f:
-            data = tomllib.load(f)
+        data, text = _read_toml(path)
+        _warn_misplaced_settings(data, text, path)
 
-        extra = data.get("extra_patterns", {})
+        extra = _section(data, "extra_patterns")
         for toml_key, attr in _TECHNIQUE_KEYS.items():
             if toml_key in extra:
                 values = extra[toml_key]
@@ -178,11 +353,15 @@ class PyFlowBattConfig:
                     if v not in current:
                         current.append(v)
 
-        eis_tags = data.get("eis_tags", {})
+        eis_tags = _section(data, "eis_tags")
         for tag, values in eis_tags.items():
-            if tag not in EIS_TAGS:
+            if _setting_section(tag) is not None:
+                continue  # a misplaced setting, already warned about
+            if not _EIS_TAG_RE.match(tag):
                 logger.warning(
-                    "Ignoring unknown eis_tags.%s in %s (expected one of %s)", tag, path, EIS_TAGS
+                    "Ignoring eis_tags.%s in %s (tags may only use letters, digits and %%.+-)",
+                    tag,
+                    path,
                 )
                 continue
             if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
@@ -191,6 +370,21 @@ class PyFlowBattConfig:
                 )
                 continue
             self.eis_tag_patterns[tag] = list(values)
+
+        eis = _section(data, "eis")
+        if "model" in eis:
+            if isinstance(eis["model"], str):
+                self.eis_model = eis["model"]
+            else:
+                logger.warning("Ignoring bad eis.model in %s (expected string)", path)
+        if "summary_params" in eis:
+            values = eis["summary_params"]
+            if isinstance(values, list) and all(isinstance(v, str) for v in values):
+                self.eis_summary_params = list(values)
+            else:
+                logger.warning(
+                    "Ignoring bad eis.summary_params in %s (expected list of strings)", path
+                )
 
         for key in ("extensions", "extra_extensions"):
             if key in data:
@@ -234,7 +428,7 @@ class PyFlowBattConfig:
                     "Ignoring bad summary_n_cycles in %s (expected list of numbers)", path
                 )
 
-        cv = data.get("cv", {})
+        cv = _section(data, "cv")
         for toml_key, attr in _CV_KEYS.items():
             if toml_key in cv:
                 if _is_number(cv[toml_key]):
@@ -256,39 +450,42 @@ class PyFlowBattConfig:
 
 
 TEMPLATE_TOML = """\
-# pyflowbatt.toml — optional PyFlowBatt configuration.
-#
-# Every setting below is commented out and shows its built-in default.
-# Uncomment and edit only the settings you want to override.
-#
-# You can put config files in:
-# The home folder (~/pyflowbatt.toml): will apply EVERYWHERE
-# The parent folder: applies to every sample folder inside
-# The sample folder itself: only applies to that sample
-# On conflicts, sample takes priority, then parent, then home.
-#
-# --- Sample name (default: reads from battinfo, otherwise uses folder name) ---
+## pyflowbatt.toml: optional PyFlowBatt configuration.
+##
+## HOW TO EDIT THIS FILE
+## A '#' at the start of a line comments it out
+## Lines starting with ## are explanations: leave them as comments
+## Lines starting with # are settings: you can remove the # and edit the value
+## Some settings are under a [section] line, like [eis]
+## You need to uncomment the [section] to use those settings
+##
+## You can put config files in:
+## The home folder (~/pyflowbatt.toml): will apply EVERYWHERE
+## The parent folder: applies to every sample folder inside
+## The sample folder itself: only applies to that sample
+## On conflicts, sample takes priority, then parent, then home.
+
+## --- Sample name (default: reads from battinfo, otherwise uses folder name) ---
 # sample_name = "daves-new-sample-01"      # hard-code an explicit sample name
 # sample_name_pattern = "^[A-Z]+-\\\\d+$"  # or a custom regex, if not hard-coded
 
-# --- File extensions searched for technique files ---
-
+## --- File extensions searched for technique files ---
 # extra_extensions = [".mgr"]      # add extra extensions to the default [".mpr"]
 # extensions = [".mpr", ".mgr"]    # or fully replace the extension list instead of adding to it
 
-# --- LSV pre/post split: file numbers below this are "pre", at/above are "post" ---
+## --- LSV pre/post split: file numbers below this are "pre", at/above are "post" ---
 # lsv_threshold = 8
 
-# --- Electrode area (cm^2), used to normalise LSV resistance ---
+## --- Electrode area (cm^2), used to normalise LSV resistance ---
 # area_cm2 = 5
 
-# --- Assembled/external resistance (ohms) ---
+## --- Assembled/external resistance (ohms) ---
 # assembled_resistance_ohm = 25000
 
-# --- Cycle counts reported in the summary sheet ---
+## --- Cycle counts reported in the summary sheet ---
 # summary_n_cycles = [10, 20, 30, 40, 50]
 
-# --- Extra filename glob patterns per technique (added to the built-in patterns below) ---
+## --- Extra filename glob patterns per technique (added to the built-in patterns below) ---
 # [extra_patterns]
 # gcpl    = ["*_cycling_*"]                  # built-in: *_GCPL_*
 # ocv     = ["*_rest_*"]                     # built-in: *_OCV_*
@@ -297,14 +494,32 @@ TEMPLATE_TOML = """\
 # cv_post = ["*_cyclic-voltammetry-post_*"]  # built-in: *_CVApost*, *_CVpost*
 # eis     = ["*_impedance_*"]                # built-in: *_PEIS_*
 
-# --- Pin EIS files to specific tags (default: tagged in filename order) ---
-# Tags: "pre", "pre-50%SOC", "post-50%SOC", "post". Unlisted tags are filled in
-# filename order from the remaining EIS files.
+## --- Pin EIS files to specific tags (default: tagged by protocol layout) ---
+## Standard tags: "pre", "pre-50%SOC", "post-50%SOC", "post".
+## Any other name made of letters, digits and %.+- also works, e.g. "pre-20%SOC".
+## Each tag gets its own row in the summary sheet.
+## Unpinned EIS files are split before/after cycling and fill the unused standard
+## tags of a standard layout (2 before + 2 after, or 1 + 1). Pinned standard tags
+## count towards the layout, custom tags don't. If the unpinned files then fit no
+## standard layout, they all get numbered tags instead: pre_1, post_1, post_2, ...
+## e.g. pinning "pre-20%SOC" to one of four standard files leaves 1 + 2, so the
+## other three become pre_1, post_1, post_2.
 # [eis_tags]
 # "pre"  = ["*_02_PEIS_*"]
+# "pre-20%SOC" = ["*_03_PEIS_*"]
 # "post" = ["*_06_PEIS_*"]
 
-# --- CV analysis parameters ---
+## --- EIS equivalent circuit model ---
+## Any fasteis circuit string e.g. "R0-(R1,CPE1)", or a built-in name like "randles".
+## Only models in the fasteis ML library get automatic initial fit parameters.
+## See https://empaeconversion.github.io/fasteis/models/
+## summary_params lists the fit parameters reported in the summary for each EIS tag,
+## named as in the EIS sheet, e.g. ["R0.r", "R1.r", "CPE1.alpha"].
+# [eis]
+# model = "L0-R0-(R1,CPE1)-(R2,CPE2)"
+# summary_params = ["R0.r"]
+
+## --- CV analysis parameters ---
 # [cv]
 # v_min = 0.4004   # voltage window used to compute scan rate
 # v_max = 0.6
@@ -425,13 +640,12 @@ def _classify_eis(
 ) -> dict[str, list[Path]]:
     """Tag EIS files, splitting them around the main cycling step.
 
-    Files pinned by `eis_tag_patterns` win; any remaining files are tagged in
-    filename order if pins exist, otherwise by :func:`_eis_order_and_tags`.
+    Files pinned by `eis_tag_patterns` win; any remaining files are tagged by
+    :func:`_eis_order_and_tags`, with pinned standard tags counted in the layout.
     """
     result: dict[str, list[Path]] = {}
     pinned: set[Path] = set()
-    for tag in EIS_TAGS:
-        patterns = config.eis_tag_patterns.get(tag)
+    for tag, patterns in config.eis_tag_patterns.items():
         if not patterns:
             continue
         matches = sorted(_glob_many(folder, patterns, config.extensions))
@@ -451,12 +665,8 @@ def _classify_eis(
     if not free_files:
         return result
 
-    # With pins in play, the remaining files just fill whatever tags are left over.
-    if pinned:
-        ordered = free_files
-        tags = [tag for tag in EIS_TAGS if f"eis_{tag}" not in result]
-    else:
-        ordered, tags = _eis_order_and_tags(free_files, gcpl_file, warn=warn)
+    taken = {tag for tag in EIS_TAGS if f"eis_{tag}" in result}
+    ordered, tags = _eis_order_and_tags(free_files, gcpl_file, taken=taken, warn=warn)
     for tag, f in zip(tags, ordered, strict=False):
         result[f"eis_{tag}"] = [f]
     return result
@@ -510,31 +720,42 @@ def _eis_sort_keys(
 
 
 def _eis_order_and_tags(
-    eis_files: list[Path], gcpl_file: Path | None, *, warn: bool
+    eis_files: list[Path],
+    gcpl_file: Path | None,
+    *,
+    taken: set[str] | None = None,
+    warn: bool,
 ) -> tuple[list[Path], list[str]]:
     """Order EIS files by when they ran and tag them by the protocol's layout.
 
     Two before and two after cycling is the standard protocol (0% and 50% SOC, each
-    side); one before and one after is the early protocol (0% SOC either side). Any
-    other layout can't be mapped onto the SOC-specific tags, so files get numbered
-    `pre_N`/`post_N` tags instead. Falls back to filename order when neither step
-    numbers nor timestamps are readable.
+    side); one before and one after is the early protocol (0% SOC either side).
+    Standard tags in `taken` are already pinned to other files: they count towards
+    the layout, and `eis_files` fill the rest. Any other layout can't be mapped onto
+    the SOC-specific tags, so files get numbered `pre_N`/`post_N` tags instead.
+    Falls back to filename order when neither step numbers nor timestamps are readable.
     """
+    taken = taken or set()
     keys, gcpl_key = _eis_sort_keys(eis_files, gcpl_file)
     if keys is None or gcpl_key is None:
         if warn:
             logger.warning(
                 "Cannot tell which EIS files are before/after cycling, tagging in filename order"
             )
-        return eis_files, EIS_TAGS
+        return eis_files, [tag for tag in EIS_TAGS if tag not in taken]
 
     ordered = [f for _, f in sorted(zip(keys, eis_files, strict=True))]
     before = [key for key in keys if key < gcpl_key]
     after = [key for key in keys if key >= gcpl_key]
-    if len(before) == 2 and len(after) == 2:
-        return ordered, EIS_TAGS
-    if len(before) == 1 and len(after) == 1:
-        return ordered, ["pre", "post"]
+    n_pre_taken = sum(tag.startswith("pre") for tag in taken)
+    n_post_taken = len(taken) - n_pre_taken
+    layout = _EIS_LAYOUTS.get((len(before) + n_pre_taken, len(after) + n_post_taken))
+    if layout:
+        pre_tags = [tag for tag in layout[0] if tag not in taken]
+        post_tags = [tag for tag in layout[1] if tag not in taken]
+        # A pinned tag outside the layout, e.g. pre-50%SOC in the early protocol, won't fit
+        if len(pre_tags) == len(before) and len(post_tags) == len(after):
+            return ordered, pre_tags + post_tags
 
     if warn:
         logger.warning(

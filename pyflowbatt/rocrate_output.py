@@ -12,6 +12,7 @@ from pyflowbatt.analysis import (
     EXTRA_INPUT_DESCRIPTIONS,
     OTHER_RAW_LABEL,
     OUTPUT_MISC_DESCRIPTIONS,
+    _custom_eis_tag,
     _generic_eis_parts,
     _rel,
     data_description,
@@ -44,6 +45,8 @@ def _measurement_technique(label: str) -> str:
     if parts := _generic_eis_parts(label):
         when, number = parts
         return f"Electrochemical Impedance Spectroscopy ({when} cycling, measurement {number})"
+    if tag := _custom_eis_tag(label):
+        return f"Electrochemical Impedance Spectroscopy ({tag})"
     return label
 
 

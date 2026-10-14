@@ -1,6 +1,7 @@
 """Tests for pyflowbatt.toml configuration and technique file classification."""
 
 import json
+import re
 import zipfile
 from pathlib import Path
 
@@ -236,8 +237,94 @@ def test_eis_tags_pin_files_to_tags(tmp_path: Path) -> None:
     assert eis == {"eis_pre": "s_02_PEIS_A.mpr", "eis_post": "s_06_PEIS_A.mpr"}
 
 
+def test_eis_tags_custom_names(tmp_path: Path) -> None:
+    """Any filename-safe tag can be pinned, and unpinned files fill the standard tags."""
+    sample = _write_two_eis_sample(tmp_path / "sample")
+    (sample / "s_07_PEIS_A.mpr").write_text("x")
+    (sample / "pyflowbatt.toml").write_text(
+        '[eis_tags]\n"pre-20%SOC" = ["*_02_PEIS_*"]\n"post-80%SOC" = ["*_07_PEIS_*"]\n'
+    )
+    config = PyFlowBattConfig.load(sample, home=tmp_path / "home")
+
+    classified = classify_technique_files(sample, config)
+
+    eis = {k: v[0].name for k, v in classified.items() if k.startswith("eis_")}
+    # Only one unpinned file is left, after cycling, which matches no standard layout
+    assert eis == {
+        "eis_pre-20%SOC": "s_02_PEIS_A.mpr",
+        "eis_post-80%SOC": "s_07_PEIS_A.mpr",
+        "eis_post_1": "s_06_PEIS_A.mpr",
+    }
+
+
+def test_eis_tags_custom_pin_keeps_standard_layout(tmp_path: Path) -> None:
+    """Pinning an extra custom tag leaves the standard protocol tagging unchanged."""
+    sample = _write_synthetic_sample(tmp_path / "sample")
+    (sample / "sample_03_PEIS_X.mpr").write_text("x")
+    (sample / "pyflowbatt.toml").write_text('[eis_tags]\n"pre-20%SOC" = ["*_03_PEIS_*"]\n')
+    config = PyFlowBattConfig.load(sample, home=tmp_path / "home")
+
+    classified = classify_technique_files(sample, config)
+
+    eis = {k: v[0].name for k, v in classified.items() if k.startswith("eis_")}
+    assert eis == {
+        "eis_pre-20%SOC": "sample_03_PEIS_X.mpr",
+        "eis_pre": "sample_02_PEIS_A.mpr",
+        "eis_pre-50%SOC": "sample_05_PEIS_B.mpr",
+        "eis_post-50%SOC": "sample_10_PEIS_C.mpr",
+        "eis_post": "sample_12_PEIS_D.mpr",
+    }
+
+
+def test_eis_tags_custom_pin_splits_unpinned_around_cycling(tmp_path: Path) -> None:
+    """Unpinned files are split before/after cycling, not filled in filename order."""
+    sample = _write_synthetic_sample(tmp_path / "sample")
+    (sample / "pyflowbatt.toml").write_text('[eis_tags]\n"pre-20%SOC" = ["*_05_PEIS_*"]\n')
+    config = PyFlowBattConfig.load(sample, home=tmp_path / "home")
+
+    classified = classify_technique_files(sample, config)
+
+    # One before and two after cycling is not a standard layout
+    eis = {k: v[0].name for k, v in classified.items() if k.startswith("eis_")}
+    assert eis == {
+        "eis_pre-20%SOC": "sample_05_PEIS_B.mpr",
+        "eis_pre_1": "sample_02_PEIS_A.mpr",
+        "eis_post_1": "sample_10_PEIS_C.mpr",
+        "eis_post_2": "sample_12_PEIS_D.mpr",
+    }
+
+
+def test_eis_tags_pinned_standard_tag_fills_its_side(tmp_path: Path) -> None:
+    """A pinned post tag leaves the other post tag for the unpinned file after cycling."""
+    sample = _write_synthetic_sample(tmp_path / "sample")
+    (sample / "pyflowbatt.toml").write_text('[eis_tags]\n"post" = ["*_12_PEIS_*"]\n')
+    config = PyFlowBattConfig.load(sample, home=tmp_path / "home")
+
+    classified = classify_technique_files(sample, config)
+
+    eis = {k: v[0].name for k, v in classified.items() if k.startswith("eis_")}
+    assert eis == {
+        "eis_post": "sample_12_PEIS_D.mpr",
+        "eis_pre": "sample_02_PEIS_A.mpr",
+        "eis_pre-50%SOC": "sample_05_PEIS_B.mpr",
+        "eis_post-50%SOC": "sample_10_PEIS_C.mpr",
+    }
+
+
+def test_eis_tags_pinned_tag_outside_layout_numbers_the_rest(tmp_path: Path) -> None:
+    """A pinned 50% SOC tag doesn't fit the early protocol, so the rest are numbered."""
+    sample = _write_two_eis_sample(tmp_path / "sample")
+    (sample / "pyflowbatt.toml").write_text('[eis_tags]\n"pre-50%SOC" = ["*_02_PEIS_*"]\n')
+    config = PyFlowBattConfig.load(sample, home=tmp_path / "home")
+
+    classified = classify_technique_files(sample, config)
+
+    eis = {k: v[0].name for k, v in classified.items() if k.startswith("eis_")}
+    assert eis == {"eis_pre-50%SOC": "s_02_PEIS_A.mpr", "eis_post_1": "s_06_PEIS_A.mpr"}
+
+
 def test_eis_tags_partial_fills_remaining_tags_in_order(tmp_path: Path) -> None:
-    """Tags not listed in eis_tags are filled in filename order from the unpinned files."""
+    """A pinned standard tag counts towards the layout, unpinned files fill the rest."""
     sample = _write_two_eis_sample(tmp_path / "sample")
     (sample / "pyflowbatt.toml").write_text('[eis_tags]\n"post" = ["*_06_PEIS_*"]\n')
     config = PyFlowBattConfig.load(sample, home=tmp_path / "home")
@@ -261,10 +348,11 @@ def test_eis_tags_sample_folder_overrides_parent(tmp_path: Path) -> None:
 
 
 def test_eis_tags_bad_entries_ignored(tmp_path: Path) -> None:
-    """Unknown tags and non-list values in eis_tags are ignored."""
+    """Tags with unsafe filename characters and non-list values in eis_tags are ignored."""
     sample = _write_two_eis_sample(tmp_path / "sample")
     (sample / "pyflowbatt.toml").write_text(
-        '[eis_tags]\n"during" = ["*_06_PEIS_*"]\n"post" = "*_06_PEIS_*"\n'
+        '[eis_tags]\n"pre/20" = ["*_06_PEIS_*"]\n"mid 1" = ["*_06_PEIS_*"]\n'
+        '"post" = "*_06_PEIS_*"\n'
     )
     config = PyFlowBattConfig.load(sample, home=tmp_path / "home")
 
@@ -1398,3 +1486,425 @@ def test_cascade_priority(tmp_path: Path) -> None:
         "*_FROM_PARENT_*",
         "*_FROM_SAMPLE_*",
     ]
+
+
+def test_eis_model_default_matches_eis_module() -> None:
+    """Without a pyflowbatt.toml, the EIS model is eis.DEFAULT_MODEL."""
+    from pyflowbatt import eis
+
+    assert PyFlowBattConfig().eis_model == eis.DEFAULT_MODEL
+
+
+def test_eis_model_toml_override(tmp_path: Path) -> None:
+    """[eis] model in pyflowbatt.toml accepts any string."""
+    sample_dir = tmp_path / "sample"
+    sample_dir.mkdir()
+    (sample_dir / "pyflowbatt.toml").write_text('[eis]\nmodel = "R0-(R1,CPE1)-Wo1"\n')
+
+    config = PyFlowBattConfig.load(sample_dir, home=tmp_path / "home")
+    assert config.eis_model == "R0-(R1,CPE1)-Wo1"
+
+
+def test_eis_model_bad_value_ignored(tmp_path: Path) -> None:
+    """A non-string [eis] model is ignored, keeping the default."""
+    sample_dir = tmp_path / "sample"
+    sample_dir.mkdir()
+    (sample_dir / "pyflowbatt.toml").write_text("[eis]\nmodel = 5\n")
+
+    config = PyFlowBattConfig.load(sample_dir, home=tmp_path / "home")
+    assert config.eis_model == "L0-R0-(R1,CPE1)-(R2,CPE2)"
+
+
+@pytest.mark.parametrize(
+    ("model", "summary_params", "has_ml", "warnings"),
+    [
+        ("L0-R0-(R1,CPE1)-(R2,CPE2)", ["R0.r"], True, []),
+        ("two_rq_l", ["R0.r", "CPE2.alpha"], True, []),
+        ("(R1,CPE1)-R0", ["R0.r"], True, []),
+        ("R1-(R2,CPE2)", ["R0.r"], True, ["R0.r is not in model"]),
+        ("R0-(R1,CPE1)-W2-Wo3", ["R0.r"], False, ["not in the fasteis ML model library"]),
+        (
+            "R1-(R2,CPE2)-W3-Wo4",
+            ["R0.r", "Wo4.tau"],
+            False,
+            ["R0.r is not in model", "not in the fasteis ML model library"],
+        ),
+    ],
+)
+def test_eis_check_model_warnings(
+    model: str,
+    summary_params: list[str],
+    has_ml: bool,
+    warnings: list[str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """check_model warns about missing summary params and a missing ML model."""
+    from pyflowbatt import eis
+
+    with caplog.at_level("WARNING", logger="pyflowbatt.eis"):
+        units, ml = eis.check_model(model, summary_params)
+    assert ml is has_ml
+    assert len(units) > 0
+    messages = [r.getMessage() for r in caplog.records]
+    assert len(messages) == len(warnings)
+    for message, expected in zip(messages, warnings, strict=True):
+        assert expected in message
+        assert eis.MODELS_URL in message
+
+
+def test_eis_check_model_invalid_raises() -> None:
+    """An invalid circuit string raises ValueError."""
+    from pyflowbatt import eis
+
+    with pytest.raises(ValueError):
+        eis.check_model("R0-(R1", ["R0.r"])
+
+
+def test_eis_analyse_custom_model_without_ml_guess() -> None:
+    """A model outside the ML library still fits, with columns named by the circuit."""
+    import fasteis
+    import numpy as np
+    import pandas as pd
+
+    from pyflowbatt import eis
+
+    model = "R0-(R1,CPE1)-Wo1"
+    f = np.logspace(5, -1, 40)
+    Z = fasteis.Circuit(model).with_values([1.0, 2.0, 1e-3, 0.9, 3.0, 10.0]).impedance(f)
+    df = pd.DataFrame(
+        {"Frequency / Hz": f, "Real Impedance / ohm": Z.real, "Imaginary Impedance / ohm": Z.imag}
+    )
+    params, Z_fit = eis.analyse(df, model=model, guess_init=False)
+    assert list(params) == ["R0.r", "R1.r", "CPE1.q", "CPE1.alpha", "Wo1.z0", "Wo1.tau"]
+    assert len(Z_fit) == len(f)
+
+
+def test_eis_summary_params_toml_override(tmp_path: Path) -> None:
+    """[eis] summary_params replaces the default list, and bad values are ignored."""
+    sample_dir = tmp_path / "sample"
+    sample_dir.mkdir()
+    home = tmp_path / "home"
+    toml = sample_dir / "pyflowbatt.toml"
+    assert PyFlowBattConfig.load(sample_dir, home=home).eis_summary_params == ["R0.r"]
+
+    toml.write_text('[eis]\nsummary_params = ["R0.r", "R1.r"]\n')
+    assert PyFlowBattConfig.load(sample_dir, home=home).eis_summary_params == ["R0.r", "R1.r"]
+
+    toml.write_text('[eis]\nsummary_params = "R1.r"\n')
+    assert PyFlowBattConfig.load(sample_dir, home=home).eis_summary_params == ["R0.r"]
+
+
+def test_eis_summary_label_pretty_units() -> None:
+    """Summary labels use display units, passing unknown unit strings through."""
+    from pyflowbatt import eis
+
+    assert eis.summary_label("R0.r", "pre", "ohm") == "EIS R0.r pre / Ω"
+    assert eis.summary_label("CPE1.alpha", "post", "-") == "EIS CPE1.alpha post / 1"
+    assert eis.summary_label("X1.y", "pre", "odd") == "EIS X1.y pre / odd"
+
+
+def test_analyse_sample_summary_reports_every_eis_tag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every summary param gets a row per standard tag plus each extra fitted tag."""
+    import numpy as np
+    import pandas as pd
+
+    from pyflowbatt import analysis as analysis_module
+
+    sample = _write_two_eis_sample(tmp_path / "sample")
+    (sample / "s_07_PEIS_A.mpr").write_text("x")
+    (sample / "pyflowbatt.toml").write_text(
+        '[eis_tags]\n"pre-20%SOC" = ["*_07_PEIS_*"]\n'
+        '[eis]\nsummary_params = ["R0.r", "CPE1.alpha", "Missing.x"]\n'
+    )
+    fitted = {"s_02_PEIS_A": 1.0, "s_06_PEIS_A": 2.0, "s_07_PEIS_A": 3.0}
+
+    def fake_analyse(_df: object, label: str, **_kwargs: object) -> tuple[dict, np.ndarray]:
+        r0 = fitted[label]
+        params = {
+            "R0.r": {"value": r0, "err": r0 / 10, "unit": "ohm"},
+            "CPE1.alpha": {"value": 0.9, "err": None, "unit": "-"},
+        }
+        return params, np.array([1 + 1j])
+
+    def fake_plot(_df: object, _z_fit: np.ndarray) -> tuple:
+        import matplotlib.pyplot as plt
+
+        return plt.subplots()
+
+    def fake_check_model(_model: str, _params: list[str]) -> tuple[dict[str, str], bool]:
+        return {"R0.r": "ohm", "CPE1.alpha": "-"}, True
+
+    monkeypatch.setattr(analysis_module, "read_to_bdf", lambda _f: pd.DataFrame({"x": [0]}))
+    monkeypatch.setattr(analysis_module, "df_save_bdf", lambda *_a, **_k: None)
+    monkeypatch.setattr(analysis_module.eis, "analyse", fake_analyse)
+    monkeypatch.setattr(analysis_module.eis, "plot", fake_plot)
+    monkeypatch.setattr(analysis_module.eis, "check_model", fake_check_model)
+
+    config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
+    analysis_module.analyse_sample(sample, save_format=None, config=config)
+
+    df = pd.read_excel(sample / "results" / "summary.xlsx", sheet_name="Summary", index_col=0)
+    eis_rows = [q for q in df.index if q.startswith("EIS")]
+    assert eis_rows == [
+        "EIS R0.r pre / Ω",
+        "EIS R0.r pre-50%SOC / Ω",
+        "EIS R0.r post-50%SOC / Ω",
+        "EIS R0.r post / Ω",
+        "EIS R0.r pre-20%SOC / Ω",
+        "EIS CPE1.alpha pre / 1",
+        "EIS CPE1.alpha pre-50%SOC / 1",
+        "EIS CPE1.alpha post-50%SOC / 1",
+        "EIS CPE1.alpha post / 1",
+        "EIS CPE1.alpha pre-20%SOC / 1",
+    ]
+    assert df.loc["EIS R0.r pre / Ω", "Value"] == 1.0
+    assert df.loc["EIS R0.r pre / Ω", "Error"] == 0.1
+    assert df.loc["EIS R0.r pre-20%SOC / Ω", "Value"] == 3.0
+    assert df.loc["EIS R0.r post / Ω", "Value"] == 2.0
+    assert np.isnan(df.loc["EIS R0.r pre-50%SOC / Ω", "Value"])
+
+
+def test_custom_eis_tag_descriptions() -> None:
+    """Custom EIS tags get descriptions naming the tag, standard ones keep theirs."""
+    from pyflowbatt import analysis as analysis_module
+    from pyflowbatt.rocrate_output import _measurement_technique
+
+    label = "eis_pre-20%SOC"
+    assert "tagged pre-20%SOC" in analysis_module.raw_description(label, Path("a.mpr"))
+    assert "tagged pre-20%SOC" in analysis_module.plot_description(label)
+    assert "tagged pre-20%SOC" in analysis_module.data_description(label)
+    assert _measurement_technique(label) == "Electrochemical Impedance Spectroscopy (pre-20%SOC)"
+    standard = analysis_module.OUTPUT_PLOT_DESCRIPTIONS["eis_pre"]
+    assert analysis_module.plot_description("eis_pre") == standard
+    assert "measurement 2" in analysis_module.plot_description("eis_post_2")
+
+
+def test_eis_summary_units_from_element(caplog: pytest.LogCaptureFixture) -> None:
+    """Summary units come from each parameter's own element, dropping unknown names."""
+    from pyflowbatt import eis
+
+    with caplog.at_level("WARNING", logger="pyflowbatt.eis"):
+        units = eis.summary_units(["R0.r", "CPE1.alpha", "Wo3.tau", "Missing.x", "R0.x"])
+    assert units == {"R0.r": "ohm", "CPE1.alpha": "-", "Wo3.tau": "s"}
+    messages = [r.getMessage() for r in caplog.records]
+    assert len(messages) == 2
+    assert "Missing.x" in messages[0]
+    assert "R0.x" in messages[1]
+
+
+def test_analyse_sample_summary_has_eis_rows_without_eis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without EIS files or a valid model, the standard EIS rows are still in the summary."""
+    import pandas as pd
+
+    from pyflowbatt import analysis as analysis_module
+
+    sample = _write_two_eis_sample(tmp_path / "sample")
+    for f in sample.glob("*_PEIS_*"):
+        f.unlink()
+    (sample / "pyflowbatt.toml").write_text('[eis]\nmodel = "R0-(R1"\n')
+    monkeypatch.setattr(analysis_module, "read_to_bdf", lambda _f: pd.DataFrame({"x": [0]}))
+    monkeypatch.setattr(analysis_module, "df_save_bdf", lambda *_a, **_k: None)
+
+    config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
+    analysis_module.analyse_sample(sample, save_format=None, config=config)
+
+    df = pd.read_excel(sample / "results" / "summary.xlsx", sheet_name="Summary", index_col=0)
+    eis_rows = [q for q in df.index if q.startswith("EIS")]
+    assert eis_rows == [
+        "EIS R0.r pre / Ω",
+        "EIS R0.r pre-50%SOC / Ω",
+        "EIS R0.r post-50%SOC / Ω",
+        "EIS R0.r post / Ω",
+    ]
+    assert df.loc[eis_rows, "Value"].isna().all()
+
+
+def test_merge_summaries_keeps_missing_rows_in_place(tmp_path: Path) -> None:
+    """Rows only some samples have go after their neighbour, not at the bottom."""
+    import pandas as pd
+
+    from pyflowbatt.analysis import merge_summaries
+
+    rows_by_sample = {
+        "a": ["OCV", "EIS R0.r pre", "EIS R0.r post", "1st CE"],
+        "b": ["OCV", "EIS R0.r pre", "EIS R0.r post", "EIS R0.r pre-20%SOC", "1st CE", "Extra"],
+        "c": ["New first", "OCV", "1st CE"],
+    }
+    paths = []
+    for name, rows in rows_by_sample.items():
+        path = tmp_path / name / "results" / "summary.xlsx"
+        path.parent.mkdir(parents=True)
+        df = pd.DataFrame({"Value": range(len(rows)), "Error": None}, index=rows)
+        df.to_excel(path, sheet_name="Summary")
+        paths.append(path)
+
+    df = merge_summaries(paths, {tmp_path / name: name for name in rows_by_sample})
+
+    assert list(df["Quantity"]) == [
+        "New first",
+        "OCV",
+        "EIS R0.r pre",
+        "EIS R0.r post",
+        "EIS R0.r pre-20%SOC",
+        "1st CE",
+        "Extra",
+    ]
+    assert df.set_index("Quantity").loc["EIS R0.r pre-20%SOC", "b"] == 3
+    assert pd.isna(df.set_index("Quantity").loc["EIS R0.r pre-20%SOC", "a"])
+
+
+@pytest.mark.parametrize(
+    ("rel_path", "frequency_domain"),
+    [
+        ("s/results/eis_pre.bdf.parquet", True),
+        ("s/results/eis_pre-20%SOC.bdf.csv", True),
+        ("s/results/s.bdf.parquet", False),
+        ("weis_sample/results/weis_sample.bdf.csv", False),
+    ],
+)
+def test_battinfo_eis_data_comment(rel_path: str, frequency_domain: bool) -> None:
+    """BDF outputs from EIS are described as frequency-domain, others as time series."""
+    from pyflowbatt.battinfo import add_data
+
+    comment = add_data(rel_path, None)["hasOutput"]["dcat:distribution"]["rdfs:comment"]
+    assert comment.startswith("Frequency-domain" if frequency_domain else "Time series")
+
+
+def test_template_every_single_hash_line_uncomments_to_valid_toml(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Explanations use ##, and deleting the # from every other line gives a valid config."""
+    from pyflowbatt.config import TEMPLATE_TOML
+
+    lines = TEMPLATE_TOML.splitlines()
+    assert all(not line or line.startswith(("##", "# ")) for line in lines)
+    uncommented = [line.removeprefix("# ") for line in lines]
+    sample_dir = tmp_path / "sample"
+    sample_dir.mkdir()
+    (sample_dir / "pyflowbatt.toml").write_text("\n".join(uncommented), encoding="utf-8")
+
+    with caplog.at_level("WARNING", logger="pyflowbatt"):
+        config = PyFlowBattConfig.load(sample_dir, home=tmp_path / "home")
+    assert caplog.records == []
+    assert config.eis_model == "L0-R0-(R1,CPE1)-(R2,CPE2)"
+    assert config.cv_v_max == 0.6
+
+
+def test_bad_toml_error_names_file_and_line(tmp_path: Path) -> None:
+    """An uncommented explanation line raises ConfigError with the file, line and a hint."""
+    from pyflowbatt.config import ConfigError
+
+    sample_dir = tmp_path / "sample"
+    sample_dir.mkdir()
+    toml = sample_dir / "pyflowbatt.toml"
+    toml.write_text(
+        "## --- Electrode area ---\narea_cm2 = 3\n\n"
+        "--- LSV pre/post split: file numbers below this are pre ---\nlsv_threshold = 8\n"
+    )
+
+    with pytest.raises(ConfigError) as excinfo:
+        PyFlowBattConfig.load(sample_dir, home=tmp_path / "home")
+    message = str(excinfo.value)
+    assert str(toml) in message
+    assert "line 4: --- LSV pre/post split" in message
+    assert "put the # back" in message
+
+
+@pytest.mark.parametrize(
+    ("toml_text", "hint"),
+    [
+        ('## Standard tags:\nStandard tags: "pre", "post".\n', "explanation line"),
+        ('model = "R0"\n# [cv]\neis = ["*_x_*"]\n[eis]\n', "deleted the # in front"),
+        ("area_cm2 = 5\narea_cm2 = 6\n", "set twice"),
+        ('sample_name_pattern = "^\\d+$"\n', "Use single quotes"),
+        ('model = "R0\n', "missing its closing quote"),
+        ('summary_params = ["R0.r", "R1.r"\n', "missing its closing ]"),
+        ("model = L0-R0\n", "Text values need quotes"),
+        ("lsv_threshold = True\n", "true/false are lowercase"),
+        ("area_cm2 = 5 cm2\n", "no units"),
+        ('[eis\nmodel = "R0"\n', "Section lines look like [eis]"),
+        ("area cm2 = 5\n", "can't contain spaces"),
+        ("x = {a = 1\n", "Only delete the single #"),
+    ],
+)
+def test_bad_toml_hint_matches_mistake(tmp_path: Path, toml_text: str, hint: str) -> None:
+    """Each kind of TOML mistake gets a hint about its likely cause."""
+    from pyflowbatt.config import ConfigError
+
+    sample_dir = tmp_path / "sample"
+    sample_dir.mkdir()
+    (sample_dir / "pyflowbatt.toml").write_text(toml_text)
+
+    with pytest.raises(ConfigError, match=re.escape(hint)):
+        PyFlowBattConfig.load(sample_dir, home=tmp_path / "home")
+
+
+def test_toml_with_bom_loads(tmp_path: Path) -> None:
+    """A UTF-8 file with a byte order mark, as some Windows editors save, still loads."""
+    sample_dir = tmp_path / "sample"
+    sample_dir.mkdir()
+    (sample_dir / "pyflowbatt.toml").write_bytes(b"\xef\xbb\xbfarea_cm2 = 3\n")
+
+    assert PyFlowBattConfig.load(sample_dir, home=tmp_path / "home").area_cm2 == 3
+
+
+@pytest.mark.parametrize(
+    ("toml_text", "expected"),
+    [
+        (
+            '# [eis]\nmodel = "R0"\n',
+            "Ignoring model at the top level ({path}, line 2): it belongs under [eis]",
+        ),
+        (
+            '[eis]\nmodel = "R0"\n\n# [cv]\nv_min = 0.1\n',
+            "Ignoring v_min in [eis] ({path}, line 5): it belongs under [cv]",
+        ),
+        (
+            "[cv]\nmin_r2 = 0.5\narea_cm2 = 3\n",
+            "Ignoring area_cm2 in [cv] ({path}, line 3): it is a top-level setting",
+        ),
+        (
+            '[eis_tags]\n"pre" = ["*_02_*"]\n# [eis]\nsummary_params = ["R1.r"]\n',
+            "Ignoring summary_params in [eis_tags] ({path}, line 4): it belongs under [eis]",
+        ),
+        ("area_cm = 3\n", "({path}, line 1): unknown setting, did you mean area_cm2?"),
+        ('[eiss]\nmodel = "R0"\n', "({path}, line 1): unknown section, did you mean [eis]?"),
+        ("cv = 5\n", "({path}, line 1): cv is a section, so write it as a [cv] line"),
+    ],
+)
+def test_misplaced_setting_warns_with_line(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, toml_text: str, expected: str
+) -> None:
+    """A setting outside its section is ignored with a warning naming its line and section."""
+    sample_dir = tmp_path / "sample"
+    sample_dir.mkdir()
+    toml = sample_dir / "pyflowbatt.toml"
+    toml.write_text(toml_text)
+
+    with caplog.at_level("WARNING", logger="pyflowbatt"):
+        config = PyFlowBattConfig.load(sample_dir, home=tmp_path / "home")
+
+    assert [r.getMessage() for r in caplog.records if expected.format(path=toml) in r.getMessage()]
+    assert config.area_cm2 is None
+    assert config.cv_v_min == 0.4004
+    assert config.eis_summary_params == ["R0.r"]
+    assert config.eis_tag_patterns in ({}, {"pre": ["*_02_*"]})
+
+
+def test_eis_tags_any_name_not_warned_as_misplaced(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Custom tag names under [eis_tags] are not reported as unknown settings."""
+    sample_dir = tmp_path / "sample"
+    sample_dir.mkdir()
+    (sample_dir / "pyflowbatt.toml").write_text('[eis_tags]\n"pre-20%SOC" = ["*_03_*"]\n')
+
+    with caplog.at_level("WARNING", logger="pyflowbatt"):
+        config = PyFlowBattConfig.load(sample_dir, home=tmp_path / "home")
+
+    assert caplog.records == []
+    assert config.eis_tag_patterns == {"pre-20%SOC": ["*_03_*"]}
