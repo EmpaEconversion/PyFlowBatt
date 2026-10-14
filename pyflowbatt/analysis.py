@@ -22,6 +22,7 @@ from pyflowbatt.config import (
     classify_technique_files,
 )
 from pyflowbatt.read import read_to_bdf
+from pyflowbatt.report import LOG_FILENAME, Reporter
 
 logger = logging.getLogger(__name__)
 
@@ -456,7 +457,7 @@ def zip_folder(root_folder: Path, zip_path: Path) -> Path:
     files in both the RO-Crate manifest and BattINFO metadata, so a file's "@id"
     can be found directly inside the zip once it's extracted.
 
-    Ignores hidden EC-lab files and Excel lock files.
+    Ignores hidden EC-lab files, Excel lock files and the PyFlowBatt log.
     """
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for file in sorted(root_folder.rglob("*")):
@@ -464,6 +465,7 @@ def zip_folder(root_folder: Path, zip_path: Path) -> Path:
                 file.is_file()
                 and file.suffix not in {".mgr", ".sta", ".mpp", ".mgp"}
                 and not file.name.startswith("~$")
+                and file.name != LOG_FILENAME
             ):
                 zf.write(file, arcname=_rel(file, root_folder))
     return zip_path
@@ -492,6 +494,7 @@ def analyse_sample(
     config: PyFlowBattConfig | None = None,
     root_folder: str | Path | None = None,
     zenodo_package: Literal["zip", "files"] = "files",
+    reporter: Reporter | None = None,
 ) -> tuple[dict[str, list[Path]], dict[str, list[Path]], dict[str, list[Path]], str | None, str]:
     """Read all the files in a folder, analayse and plot everything.
 
@@ -520,6 +523,8 @@ def analyse_sample(
     known: "files" (default) points directly at each file's own Zenodo download URL
     (matching an unzipped upload); "zip" points at one zip's Zenodo download URL with the
     in-archive path as a fragment (see :func:`pyflowbatt.battinfo.zenodo_download_url`).
+
+    ``reporter`` is told when each step starts and finishes, to show progress.
     """
     folder = Path(folder)
     root_folder = Path(root_folder) if root_folder is not None else folder
@@ -527,8 +532,9 @@ def analyse_sample(
     pub_info_path = Path(pub_info_path) if pub_info_path is not None else None
     fcid: str | None = None
     config = config or PyFlowBattConfig.load(folder)
+    reporter = reporter or Reporter()
 
-    logger.info("\n🌊 PyFlowBatt-ing %s", folder.name)
+    logger.info("Analysing %s", folder.name)
     classified = classify_technique_files(folder, config, warn=True)
     gcpl_files = classified.get("gcpl", [])
     gcpl_file = gcpl_files[0] if gcpl_files else None
@@ -551,6 +557,25 @@ def analyse_sample(
     logger.debug("Reading CV after:  %s", ", ".join([f.stem for f in cv_files_after]))
     logger.debug("Reading EIS files: %s", ", ".join([f.stem for f in eis_by_tag.values()]))
     logger.debug("Checking BattINFO files: %s", ", ".join([f.stem for f in battinfo_files]))
+    reporter.plan(
+        [
+            "BattINFO",
+            "OCV",
+            "GCPL",
+            *([f"LSV {p}" for p in ("pre", "post") if classified.get(f"lsv_{p}")] or ["LSV"]),
+            *(
+                [
+                    f"CV {p}"
+                    for p, files in (("pre", cv_files_before), ("post", cv_files_after))
+                    if files
+                ]
+                or ["CV"]
+            ),
+            *([f"EIS {tag}" for tag in eis_by_tag] or ["EIS"]),
+            "Summary",
+            "Metadata",
+        ]
+    )
 
     cycle_df = None
     cv_df = None
@@ -569,64 +594,65 @@ def analyse_sample(
         else (".csv.parquet" if save_format == "csv" else None)
     )
 
-    logger.info("Battinfo-ifying")
     battinfo_json = None
     battinfo_sample_id = None
     raw_battinfo_json: dict | None = None
     if not battinfo_files:
-        logger.info("- ☹️ No battinfo xlsx found, skipping")
+        logger.debug("No BattINFO xlsx found, skipping")
+        reporter.skip("BattINFO", "no xlsx")
     else:
-        for file in battinfo_files:
-            raw_json = None
-            with contextlib.suppress(ValueError):
-                raw_json = convert_excel_to_jsonld(file)
-            if raw_json is None:
-                continue
-            battinfo_xlsx_path = file
-            fcid = raw_json["schema:productID"]
-            battinfo_sample_id = raw_json["schema:name"]
-            raw_battinfo_json = raw_json
-            battinfo_json = battinfo.make_test_object(raw_json)
+        with reporter.task("BattINFO"):
+            for file in battinfo_files:
+                raw_json = None
+                with contextlib.suppress(ValueError):
+                    raw_json = convert_excel_to_jsonld(file)
+                if raw_json is None:
+                    continue
+                battinfo_xlsx_path = file
+                fcid = raw_json["schema:productID"]
+                battinfo_sample_id = raw_json["schema:name"]
+                raw_battinfo_json = raw_json
+                battinfo_json = battinfo.make_test_object(raw_json)
 
-            # Create list of everything that can be included in JSON-LD
-            merge_list = [
-                battinfo_json,
-                battinfo.add_input_and_output(),
-                battinfo.add_software(),
-            ]
-            if pub_info:
-                if pub_info.get("zenodo_doi_url"):
-                    merge_list.append(battinfo.add_zenodo_url(pub_info["zenodo_doi_url"]))
-                if pub_info.get("citation_string"):
-                    merge_list.append(battinfo.add_citation(pub_info["citation_string"]))
-                if pub_info.get("institution"):
-                    merge_list.append(
-                        battinfo.add_institution(
-                            pub_info["institution"],
-                            pub_info.get("institutions", {})
-                            .get(pub_info["institution"], {})
-                            .get("wikidata_url"),
+                # Create list of everything that can be included in JSON-LD
+                merge_list = [
+                    battinfo_json,
+                    battinfo.add_input_and_output(),
+                    battinfo.add_software(),
+                ]
+                if pub_info:
+                    if pub_info.get("zenodo_doi_url"):
+                        merge_list.append(battinfo.add_zenodo_url(pub_info["zenodo_doi_url"]))
+                    if pub_info.get("citation_string"):
+                        merge_list.append(battinfo.add_citation(pub_info["citation_string"]))
+                    if pub_info.get("institution"):
+                        merge_list.append(
+                            battinfo.add_institution(
+                                pub_info["institution"],
+                                pub_info.get("institutions", {})
+                                .get(pub_info["institution"], {})
+                                .get("wikidata_url"),
+                            )
                         )
-                    )
-                if pub_info.get("authors") and pub_info.get("institutions"):
-                    merge_list.append(
-                        battinfo.add_authors(pub_info["authors"], pub_info["institutions"]),
-                    )
-                if pub_info.get("sample_to_fig"):
-                    merge_list.append(
-                        battinfo.add_associated_media(
-                            pub_info.get("publication_doi_url"),
-                            pub_info["sample_to_fig"],
-                            fcid,
-                            battinfo_sample_id,
-                        ),
-                    )
+                    if pub_info.get("authors") and pub_info.get("institutions"):
+                        merge_list.append(
+                            battinfo.add_authors(pub_info["authors"], pub_info["institutions"]),
+                        )
+                    if pub_info.get("sample_to_fig"):
+                        merge_list.append(
+                            battinfo.add_associated_media(
+                                pub_info.get("publication_doi_url"),
+                                pub_info["sample_to_fig"],
+                                fcid,
+                                battinfo_sample_id,
+                            ),
+                        )
 
-            # Merge everything
-            battinfo_json = battinfo.merge_jsonld_on_type(merge_list)
-            break
-        else:
-            logger.info("- ☹️ Couldn't convert battinfo xlsx")
+                # Merge everything
+                battinfo_json = battinfo.merge_jsonld_on_type(merge_list)
+                break
+            else:
+                logger.warning("Couldn't convert any xlsx to BattINFO, no metadata written")
 
     sample_id = get_sampleid_from_folderpath(folder, config, battinfo_sample_id)
     area_cm2 = get_area_cm2(config, raw_battinfo_json)
@@ -634,142 +660,148 @@ def analyse_sample(
         config, raw_battinfo_json, gcpl_files[0].stem if gcpl_files else None
     )
 
-    logger.info("⛓️‍💥 Analysing OCV")
     av_ocv = (np.nan, np.nan)
     if len(ocv_files) == 0:
-        logger.info("- ☹️ No OCV found, skipping")
+        logger.debug("No OCV found, skipping")
+        reporter.skip("OCV", "no files")
     else:
-        try:
-            df = read_to_bdf(ocv_files[0])
-            av_ocv = ocv.analyse(df)
-            tracked_mpr_inputs["ocv"] = [ocv_files[0]]
-        except Exception:
-            logger.exception("Failed to analyse OCV")
+        with reporter.task("OCV"):
+            try:
+                df = read_to_bdf(ocv_files[0])
+                av_ocv = ocv.analyse(df)
+                tracked_mpr_inputs["ocv"] = [ocv_files[0]]
+            except Exception:
+                logger.exception("Failed to analyse OCV")
 
-    logger.info("🔋 Analysing GCPL")
     if gcpl_file is None:
-        logger.warning("- ☹️ No GCPL files found, skipping")
+        logger.debug("No GCPL files found, skipping")
+        reporter.skip("GCPL", "no files")
     else:
-        try:
-            df, cycle_df = gcpl.analyse(read_to_bdf(gcpl_file))
-            fig, _ax = gcpl.plot(df, cycle_df)
-            fig.savefig(results_dir / "gcpl.png")
-            plt.close(fig)
-            ratetest_df = gcpl.cycles_to_ratetest(cycle_df)
-            df_save_bdf(df, results_dir / "gcpl.x", save_format=save_format)
-            tracked_outputs["gcpl"] = [results_dir / "gcpl.png"]
-            if bdf_suffix:
-                tracked_outputs["gcpl"].append((results_dir / "gcpl.x").with_suffix(bdf_suffix))
-            tracked_mpr_inputs["gcpl"] = [gcpl_file]
-        except Exception as e:
-            cycle_df = None
-            logger.warning("- Failed to analyse %s: %s", gcpl_file.stem, str(e))
+        with reporter.task("GCPL"):
+            try:
+                df, cycle_df = gcpl.analyse(read_to_bdf(gcpl_file))
+                fig, _ax = gcpl.plot(df, cycle_df)
+                fig.savefig(results_dir / "gcpl.png")
+                plt.close(fig)
+                ratetest_df = gcpl.cycles_to_ratetest(cycle_df)
+                df_save_bdf(df, results_dir / "gcpl.x", save_format=save_format)
+                tracked_outputs["gcpl"] = [results_dir / "gcpl.png"]
+                if bdf_suffix:
+                    tracked_outputs["gcpl"].append((results_dir / "gcpl.x").with_suffix(bdf_suffix))
+                tracked_mpr_inputs["gcpl"] = [gcpl_file]
+            except Exception as e:
+                cycle_df = None
+                logger.error("Failed to analyse %s: %s", gcpl_file.stem, str(e))  # noqa: TRY400
 
-    logger.info("↗️ Analysing LSV")
     lsv_res = {"pre": np.nan, "post": np.nan}
     lsv_pre_files = classified.get("lsv_pre", [])
     lsv_post_files = classified.get("lsv_post", [])
     if not lsv_pre_files and not lsv_post_files:
-        logger.info("- ☹️ No LSV files found, skipping")
+        logger.debug("No LSV files found, skipping")
+        reporter.skip("LSV", "no files")
     else:
-        if bool(lsv_pre_files) != bool(lsv_post_files):
-            only = "pre" if lsv_pre_files else "post"
-            logger.warning("- Only one LSV file found, assuming it is %s", only)
         lsv_rows = []
         for p, lsv_files_p in [("pre", lsv_pre_files), ("post", lsv_post_files)]:
             if not lsv_files_p:
                 continue
-            try:
-                df = read_to_bdf(lsv_files_p[0])
-                results = lsv.analyse(df, area_cm2=area_cm2)
-                results["File name"] = lsv_files_p[0].name
-                fig, _ax = lsv.plot(df, results)
-                fig.savefig(results_dir / f"lsv_{p}.png")
-                plt.close(fig)
-                df_save_bdf(df, results_dir / f"lsv_{p}.x", save_format=save_format)
-                lsv_res[p] = float(results["Area specific resistance / Ω cm²"])
-                tracked_outputs[f"lsv_{p}"] = [results_dir / f"lsv_{p}.png"]
-                if bdf_suffix:
-                    tracked_outputs[f"lsv_{p}"].append(
-                        (results_dir / f"lsv_{p}.x").with_suffix(bdf_suffix)
-                    )
-                tracked_mpr_inputs[f"lsv_{p}"] = [lsv_files_p[0]]
-                lsv_rows.append({"Pre or post cycle": p, **results})
-            except Exception:
-                logger.exception("Failed to analyse LSV file")
+            with reporter.task(f"LSV {p}"):
+                if bool(lsv_pre_files) != bool(lsv_post_files):
+                    logger.warning("Only one LSV file found, assuming it is %s", p)
+                try:
+                    df = read_to_bdf(lsv_files_p[0])
+                    results = lsv.analyse(df, area_cm2=area_cm2)
+                    results["File name"] = lsv_files_p[0].name
+                    fig, _ax = lsv.plot(df, results)
+                    fig.savefig(results_dir / f"lsv_{p}.png")
+                    plt.close(fig)
+                    df_save_bdf(df, results_dir / f"lsv_{p}.x", save_format=save_format)
+                    lsv_res[p] = float(results["Area specific resistance / Ω cm²"])
+                    tracked_outputs[f"lsv_{p}"] = [results_dir / f"lsv_{p}.png"]
+                    if bdf_suffix:
+                        tracked_outputs[f"lsv_{p}"].append(
+                            (results_dir / f"lsv_{p}.x").with_suffix(bdf_suffix)
+                        )
+                    tracked_mpr_inputs[f"lsv_{p}"] = [lsv_files_p[0]]
+                    lsv_rows.append({"Pre or post cycle": p, **results})
+                except Exception:
+                    logger.exception("Failed to analyse LSV file")
         if lsv_rows:
             lsv_df = pd.DataFrame(lsv_rows)
 
-    logger.info("🚴 Analysing CV")
     cv_res = {"pre": np.nan, "post": np.nan}
     if len(cv_files_before) == 0 and len(cv_files_after) == 0:
-        logger.warning("- ☹️ No  files found, skipping")
+        logger.debug("No CV files found, skipping")
+        reporter.skip("CV", "no files")
     else:
         for p, cv_files in [("pre", cv_files_before), ("post", cv_files_after)]:
             if not cv_files:
                 continue
-            try:
-                df, cv_df, capacitance_mF = cv.analyse(
-                    read_to_bdf(cv_files[0]),
-                    v_min=config.cv_v_min,
-                    v_max=config.cv_v_max,
-                    v_med=config.cv_v_med,
-                    v_range=config.cv_v_range,
-                    min_r2=config.cv_min_r2,
-                )
-                df_save_bdf(df, results_dir / f"cv_{p}.x", save_format=save_format)
-                fig, _ax = cv.plot(df, cv_df, min_r2=config.cv_min_r2)
-                fig.savefig(results_dir / f"cv_{p}.png")
-                plt.close(fig)
-                if capacitance_mF:
-                    cv_res[p] = capacitance_mF
-                tracked_outputs[f"cv_{p}"] = [results_dir / f"cv_{p}.png"]
-                if bdf_suffix:
-                    tracked_outputs[f"cv_{p}"].append(
-                        (results_dir / f"cv_{p}.x").with_suffix(bdf_suffix)
+            with reporter.task(f"CV {p}"):
+                try:
+                    df, cv_df, capacitance_mF = cv.analyse(
+                        read_to_bdf(cv_files[0]),
+                        v_min=config.cv_v_min,
+                        v_max=config.cv_v_max,
+                        v_med=config.cv_v_med,
+                        v_range=config.cv_v_range,
+                        min_r2=config.cv_min_r2,
                     )
-                tracked_mpr_inputs[f"cv_{p}"] = [cv_files[0]]
-            except Exception as e:
-                logger.warning("- Failed to analyse %s: %s", cv_files[0].stem, str(e))
+                    df_save_bdf(df, results_dir / f"cv_{p}.x", save_format=save_format)
+                    fig, _ax = cv.plot(df, cv_df, min_r2=config.cv_min_r2)
+                    fig.savefig(results_dir / f"cv_{p}.png")
+                    plt.close(fig)
+                    if capacitance_mF:
+                        cv_res[p] = capacitance_mF
+                    tracked_outputs[f"cv_{p}"] = [results_dir / f"cv_{p}.png"]
+                    if bdf_suffix:
+                        tracked_outputs[f"cv_{p}"].append(
+                            (results_dir / f"cv_{p}.x").with_suffix(bdf_suffix)
+                        )
+                    tracked_mpr_inputs[f"cv_{p}"] = [cv_files[0]]
+                except Exception as e:
+                    logger.error("Failed to analyse %s: %s", cv_files[0].stem, str(e))  # noqa: TRY400
 
-    logger.info("🌈 Analysing PEIS")
     eis_res = {}
     rows = []
     eis_units: dict[str, str] = {}
     has_ml_guess = False
     eis_to_fit = eis_by_tag
     if not eis_by_tag:
-        logger.warning("- ☹️ No EIS files were found, skipping")
+        logger.debug("No EIS files found, skipping")
+        reporter.skip("EIS", "no files")
     else:
         try:
             eis_units, has_ml_guess = eis.check_model(config.eis_model, config.eis_summary_params)
         except ValueError as e:
-            logger.warning("- Invalid EIS model %s, skipping EIS: %s", config.eis_model, e)
+            logger.warning("Invalid EIS model %s, skipping EIS: %s", config.eis_model, e)
+            for tag in eis_by_tag:
+                reporter.skip(f"EIS {tag}", "invalid model")
             eis_to_fit = {}
     for tag, eis_file in eis_to_fit.items():
         f = Path(eis_file)
-        try:
-            df = read_to_bdf(f)
-            params, Z_fit = eis.analyse(
-                df, label=f.stem, model=config.eis_model, guess_init=has_ml_guess
-            )
-            fig, _ax = eis.plot(df, Z_fit)
-            fig.savefig(results_dir / f"eis_{tag}.png")
-            plt.close(fig)
-            eis_res[tag] = params
-            df["Real Impedance Fit / ohm"] = np.real(Z_fit)
-            df["Imaginary Impedance Fit / ohm"] = np.imag(Z_fit)
-            df_save_bdf(df, results_dir / f"eis_{tag}.x", save_format=save_format)
-            tracked_outputs[f"eis_{tag}"] = [results_dir / f"eis_{tag}.png"]
-            if bdf_suffix:
-                tracked_outputs[f"eis_{tag}"].append(
-                    (results_dir / f"eis_{tag}.x").with_suffix(bdf_suffix)
+        with reporter.task(f"EIS {tag}"):
+            try:
+                df = read_to_bdf(f)
+                params, Z_fit = eis.analyse(
+                    df, label=f.stem, model=config.eis_model, guess_init=has_ml_guess
                 )
-            tracked_mpr_inputs[f"eis_{tag}"] = [Path(eis_file)]
-            for name, values in params.items():
-                rows.append({"file": f.stem, "tag": tag, "name": name, **values})
-        except Exception as e:
-            logger.warning("- Failed to fit %s: %s", f.stem, str(e))
+                fig, _ax = eis.plot(df, Z_fit)
+                fig.savefig(results_dir / f"eis_{tag}.png")
+                plt.close(fig)
+                eis_res[tag] = params
+                df["Real Impedance Fit / ohm"] = np.real(Z_fit)
+                df["Imaginary Impedance Fit / ohm"] = np.imag(Z_fit)
+                df_save_bdf(df, results_dir / f"eis_{tag}.x", save_format=save_format)
+                tracked_outputs[f"eis_{tag}"] = [results_dir / f"eis_{tag}.png"]
+                if bdf_suffix:
+                    tracked_outputs[f"eis_{tag}"].append(
+                        (results_dir / f"eis_{tag}.x").with_suffix(bdf_suffix)
+                    )
+                tracked_mpr_inputs[f"eis_{tag}"] = [Path(eis_file)]
+                for name, values in params.items():
+                    rows.append({"file": f.stem, "tag": tag, "name": name, **values})
+            except Exception as e:
+                logger.error("Failed to fit %s: %s", f.stem, str(e))  # noqa: TRY400
     if rows:
         eis_df = pd.DataFrame(rows)
         eis_df = eis_df.pivot(index=["file", "tag"], columns=["name"]).reset_index()
@@ -777,140 +809,139 @@ def analyse_sample(
         order = [f"{name}_{x}" for name in eis_units for x in ["value", "err", "unit"]]
         eis_df = eis_df[["file", "tag", *order]]
 
-    logger.info("💪 Making sample summary")
+    with reporter.task("Summary", detail="results/summary.xlsx"):
+        # Standard tags always get rows so combined summaries line up, other tags follow
+        eis_tags = [*EIS_TAGS, *(tag for tag in eis_res if tag not in EIS_TAGS)]
+        eis_rows = {}
+        for param, unit in eis.summary_units(config.eis_summary_params).items():
+            for tag in eis_tags:
+                fit = eis_res.get(tag, {}).get(param, {})
+                label = eis.summary_label(param, tag, unit)
+                eis_rows[label] = {"Value": fit.get("value"), "Error": fit.get("err")}
 
-    # Standard tags always get rows so combined summaries line up, other tags follow
-    eis_tags = [*EIS_TAGS, *(tag for tag in eis_res if tag not in EIS_TAGS)]
-    eis_rows = {}
-    for param, unit in eis.summary_units(config.eis_summary_params).items():
-        for tag in eis_tags:
-            fit = eis_res.get(tag, {}).get(param, {})
-            label = eis.summary_label(param, tag, unit)
-            eis_rows[label] = {"Value": fit.get("value"), "Error": fit.get("err")}
-
-    # Create keys
-    cols = [
-        "Av. OCV / V",
-        "ASR pre / Ω cm²",
-        "ASR post / Ω cm²",
-        "∆ASR / Ω cm²",
-        "F pre / mF",
-        "F post / mF",
-        "∆F / mF",
-        "Assembled resistance / Ω",
-        *eis_rows,
-        "1st CE / %",
-        "1st EE / %",
-        "1st VE / %",
-    ]
-    # n cycles to include in the summary file
-    n_cycles = config.summary_n_cycles
-    for n in n_cycles:
-        cols.extend(
-            [
-                f"{n} cycles avg. CE / %",
-                f"{n} cycles avg. EE / %",
-                f"{n} cycles avg. VE / %",
-                f"{n} cycles avg. charge capacity / mAh",
-                f"{n} cycles avg. discharge capacity / mAh",
-            ]
-        )
-    summary = {col: {"Value": np.nan, "Error": np.nan} for col in cols}
-
-    # Now fill in values
-    summary["Av. OCV / V"]["Value"] = av_ocv[0]
-    summary["Av. OCV / V"]["Error"] = av_ocv[1]
-    summary["ASR pre / Ω cm²"]["Value"] = lsv_res["pre"]
-    summary["ASR post / Ω cm²"]["Value"] = lsv_res["post"]
-    summary["∆ASR / Ω cm²"]["Value"] = lsv_res["post"] - lsv_res["pre"]
-    summary["F pre / mF"]["Value"] = cv_res["pre"]
-    summary["F post / mF"]["Value"] = cv_res["post"]
-    summary["∆F / mF"]["Value"] = (
-        cv_res["post"] - cv_res["pre"] if (cv_res["post"] and cv_res["pre"]) else None
-    )
-    summary["Assembled resistance / Ω"]["Value"] = assembled_resistance_ohm
-    summary.update(eis_rows)
-
-    if cycle_df is not None:
-        mask = cycle_df["Cycle Count / 1"] == 1
-        summary["1st CE / %"]["Value"] = float(
-            cycle_df.loc[mask, "Coulombic Efficiency / %"].to_numpy()[0]
-        )
-        summary["1st EE / %"]["Value"] = float(
-            cycle_df.loc[mask, "Energy Efficiency / %"].to_numpy()[0]
-        )
-        summary["1st VE / %"]["Value"] = float(
-            cycle_df.loc[mask, "Voltage Efficiency / %"].to_numpy()[0]
-        )
-
-        max_cycles = cycle_df["Cycle Count / 1"].max()
+        # Create keys
+        cols = [
+            "Av. OCV / V",
+            "ASR pre / Ω cm²",
+            "ASR post / Ω cm²",
+            "∆ASR / Ω cm²",
+            "F pre / mF",
+            "F post / mF",
+            "∆F / mF",
+            "Assembled resistance / Ω",
+            *eis_rows,
+            "1st CE / %",
+            "1st EE / %",
+            "1st VE / %",
+        ]
+        # n cycles to include in the summary file
+        n_cycles = config.summary_n_cycles
         for n in n_cycles:
-            if n <= max_cycles:
-                mask = cycle_df["Cycle Count / 1"] <= n
-                summary[f"{n} cycles avg. CE / %"]["Value"] = float(
-                    cycle_df.loc[mask, "Coulombic Efficiency / %"].mean()
-                )
-                summary[f"{n} cycles avg. CE / %"]["Error"] = float(
-                    cycle_df.loc[mask, "Coulombic Efficiency / %"].std()
-                )
-                summary[f"{n} cycles avg. EE / %"]["Value"] = float(
-                    cycle_df.loc[mask, "Energy Efficiency / %"].mean()
-                )
-                summary[f"{n} cycles avg. EE / %"]["Error"] = float(
-                    cycle_df.loc[mask, "Energy Efficiency / %"].std()
-                )
-                summary[f"{n} cycles avg. VE / %"]["Value"] = float(
-                    cycle_df.loc[mask, "Voltage Efficiency / %"].mean()
-                )
-                summary[f"{n} cycles avg. VE / %"]["Error"] = float(
-                    cycle_df.loc[mask, "Voltage Efficiency / %"].std()
-                )
-                summary[f"{n} cycles avg. charge capacity / mAh"]["Value"] = float(
-                    cycle_df.loc[mask, "Charge Capacity / mAh"].mean()
-                )
-                summary[f"{n} cycles avg. charge capacity / mAh"]["Error"] = float(
-                    cycle_df.loc[mask, "Charge Capacity / mAh"].std()
-                )
-                summary[f"{n} cycles avg. discharge capacity / mAh"]["Value"] = float(
-                    cycle_df.loc[mask, "Discharge Capacity / mAh"].mean()
-                )
-                summary[f"{n} cycles avg. discharge capacity / mAh"]["Error"] = float(
-                    cycle_df.loc[mask, "Discharge Capacity / mAh"].std()
-                )
+            cols.extend(
+                [
+                    f"{n} cycles avg. CE / %",
+                    f"{n} cycles avg. EE / %",
+                    f"{n} cycles avg. VE / %",
+                    f"{n} cycles avg. charge capacity / mAh",
+                    f"{n} cycles avg. discharge capacity / mAh",
+                ]
+            )
+        summary = {col: {"Value": np.nan, "Error": np.nan} for col in cols}
 
-    writer = pd.ExcelWriter(folder / "results" / "summary.xlsx", engine="xlsxwriter")
-    df = pd.DataFrame.from_dict(summary, orient="index").reset_index()
-    df = df.rename(columns={"index": "Quantity"})
-    df.to_excel(writer, sheet_name="Summary", index=False)
-    workbook = writer.book
-    worksheet = writer.sheets["Summary"]
-    worksheet.autofit()
+        # Now fill in values
+        summary["Av. OCV / V"]["Value"] = av_ocv[0]
+        summary["Av. OCV / V"]["Error"] = av_ocv[1]
+        summary["ASR pre / Ω cm²"]["Value"] = lsv_res["pre"]
+        summary["ASR post / Ω cm²"]["Value"] = lsv_res["post"]
+        summary["∆ASR / Ω cm²"]["Value"] = lsv_res["post"] - lsv_res["pre"]
+        summary["F pre / mF"]["Value"] = cv_res["pre"]
+        summary["F post / mF"]["Value"] = cv_res["post"]
+        summary["∆F / mF"]["Value"] = (
+            cv_res["post"] - cv_res["pre"] if (cv_res["post"] and cv_res["pre"]) else None
+        )
+        summary["Assembled resistance / Ω"]["Value"] = assembled_resistance_ohm
+        summary.update(eis_rows)
 
-    if cycle_df is not None:
-        cycle_df.to_excel(writer, sheet_name="Cycling", index=False)
-        worksheet = writer.sheets["Cycling"]
-        worksheet.autofit()
-    if ratetest_df is not None:
-        ratetest_df = ratetest_df.drop("Times seen", axis=1)
-        ratetest_df.to_excel(writer, sheet_name="Ratetest", index=False)
-        worksheet = writer.sheets["Ratetest"]
-        worksheet.autofit()
-    if cv_df is not None:
-        cv_df = cv_df.loc[:, ["CV Cycle", *[c for c in cv_df.columns if c not in ["CV Cycle"]]]]
-        cv_df.to_excel(writer, sheet_name="CV", index=False)
-        worksheet = writer.sheets["CV"]
-        worksheet.autofit()
-    if lsv_df is not None:
-        lsv_df.to_excel(writer, sheet_name="LSV", index=False)
-        worksheet = writer.sheets["LSV"]
-        worksheet.autofit()
-    if eis_df is not None:
-        eis_df.to_excel(writer, sheet_name="EIS", index=False)
-        worksheet = writer.sheets["EIS"]
+        if cycle_df is not None:
+            mask = cycle_df["Cycle Count / 1"] == 1
+            summary["1st CE / %"]["Value"] = float(
+                cycle_df.loc[mask, "Coulombic Efficiency / %"].to_numpy()[0]
+            )
+            summary["1st EE / %"]["Value"] = float(
+                cycle_df.loc[mask, "Energy Efficiency / %"].to_numpy()[0]
+            )
+            summary["1st VE / %"]["Value"] = float(
+                cycle_df.loc[mask, "Voltage Efficiency / %"].to_numpy()[0]
+            )
+
+            max_cycles = cycle_df["Cycle Count / 1"].max()
+            for n in n_cycles:
+                if n <= max_cycles:
+                    mask = cycle_df["Cycle Count / 1"] <= n
+                    summary[f"{n} cycles avg. CE / %"]["Value"] = float(
+                        cycle_df.loc[mask, "Coulombic Efficiency / %"].mean()
+                    )
+                    summary[f"{n} cycles avg. CE / %"]["Error"] = float(
+                        cycle_df.loc[mask, "Coulombic Efficiency / %"].std()
+                    )
+                    summary[f"{n} cycles avg. EE / %"]["Value"] = float(
+                        cycle_df.loc[mask, "Energy Efficiency / %"].mean()
+                    )
+                    summary[f"{n} cycles avg. EE / %"]["Error"] = float(
+                        cycle_df.loc[mask, "Energy Efficiency / %"].std()
+                    )
+                    summary[f"{n} cycles avg. VE / %"]["Value"] = float(
+                        cycle_df.loc[mask, "Voltage Efficiency / %"].mean()
+                    )
+                    summary[f"{n} cycles avg. VE / %"]["Error"] = float(
+                        cycle_df.loc[mask, "Voltage Efficiency / %"].std()
+                    )
+                    summary[f"{n} cycles avg. charge capacity / mAh"]["Value"] = float(
+                        cycle_df.loc[mask, "Charge Capacity / mAh"].mean()
+                    )
+                    summary[f"{n} cycles avg. charge capacity / mAh"]["Error"] = float(
+                        cycle_df.loc[mask, "Charge Capacity / mAh"].std()
+                    )
+                    summary[f"{n} cycles avg. discharge capacity / mAh"]["Value"] = float(
+                        cycle_df.loc[mask, "Discharge Capacity / mAh"].mean()
+                    )
+                    summary[f"{n} cycles avg. discharge capacity / mAh"]["Error"] = float(
+                        cycle_df.loc[mask, "Discharge Capacity / mAh"].std()
+                    )
+
+        writer = pd.ExcelWriter(folder / "results" / "summary.xlsx", engine="xlsxwriter")
+        df = pd.DataFrame.from_dict(summary, orient="index").reset_index()
+        df = df.rename(columns={"index": "Quantity"})
+        df.to_excel(writer, sheet_name="Summary", index=False)
+        workbook = writer.book
+        worksheet = writer.sheets["Summary"]
         worksheet.autofit()
 
-    workbook.close()
-    tracked_outputs["summary"] = [results_dir / "summary.xlsx"]
+        if cycle_df is not None:
+            cycle_df.to_excel(writer, sheet_name="Cycling", index=False)
+            worksheet = writer.sheets["Cycling"]
+            worksheet.autofit()
+        if ratetest_df is not None:
+            ratetest_df = ratetest_df.drop("Times seen", axis=1)
+            ratetest_df.to_excel(writer, sheet_name="Ratetest", index=False)
+            worksheet = writer.sheets["Ratetest"]
+            worksheet.autofit()
+        if cv_df is not None:
+            cv_df = cv_df.loc[:, ["CV Cycle", *[c for c in cv_df.columns if c not in ["CV Cycle"]]]]
+            cv_df.to_excel(writer, sheet_name="CV", index=False)
+            worksheet = writer.sheets["CV"]
+            worksheet.autofit()
+        if lsv_df is not None:
+            lsv_df.to_excel(writer, sheet_name="LSV", index=False)
+            worksheet = writer.sheets["LSV"]
+            worksheet.autofit()
+        if eis_df is not None:
+            eis_df.to_excel(writer, sheet_name="EIS", index=False)
+            worksheet = writer.sheets["EIS"]
+            worksheet.autofit()
+
+        workbook.close()
+        tracked_outputs["summary"] = [results_dir / "summary.xlsx"]
 
     # Every raw file in the folder, whether or not its analysis produced anything, so the
     # metadata describes the data that ships rather than only what could be analysed.
@@ -935,67 +966,70 @@ def analyse_sample(
         tracked_extra_inputs["pub_info"] = [pub_info_path]
 
     if battinfo_json is not None:
-        zenodo_url = pub_info.get("zenodo_doi_url") if pub_info else None
-        zenodo_zip_filename = pub_info.get("zenodo_zip_filename") or f"{root_folder.name}.zip"
-        for label, paths in raw_inputs.items():
-            for path in paths:
-                snippet = battinfo.add_data(
+        with reporter.task("Metadata"):
+            zenodo_url = pub_info.get("zenodo_doi_url") if pub_info else None
+            zenodo_zip_filename = pub_info.get("zenodo_zip_filename") or f"{root_folder.name}.zip"
+            for label, paths in raw_inputs.items():
+                for path in paths:
+                    snippet = battinfo.add_data(
+                        _rel(path, root_folder),
+                        zenodo_url,
+                        extras={"rdfs:comment": raw_description(label, path)},
+                        package=zenodo_package,
+                        zip_filename=zenodo_zip_filename,
+                    )
+                    battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
+            for path in mps_files:
+                snippet = battinfo.add_input_data(
                     _rel(path, root_folder),
                     zenodo_url,
-                    extras={"rdfs:comment": raw_description(label, path)},
+                    EXTRA_INPUT_DESCRIPTIONS["protocol"],
                     package=zenodo_package,
                     zip_filename=zenodo_zip_filename,
                 )
                 battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
-        for path in mps_files:
-            snippet = battinfo.add_input_data(
-                _rel(path, root_folder),
-                zenodo_url,
-                EXTRA_INPUT_DESCRIPTIONS["protocol"],
-                package=zenodo_package,
-                zip_filename=zenodo_zip_filename,
-            )
-            battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
-        if battinfo_xlsx_path:
-            snippet = battinfo.add_input_data(
-                _rel(battinfo_xlsx_path, root_folder),
-                zenodo_url,
-                EXTRA_INPUT_DESCRIPTIONS["battinfo_xlsx"],
-                package=zenodo_package,
-                zip_filename=zenodo_zip_filename,
-            )
-            battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
-        for path in tracked_extra_inputs.get("pub_info", []):
-            snippet = battinfo.add_input_data(
-                _rel(path, root_folder),
-                zenodo_url,
-                EXTRA_INPUT_DESCRIPTIONS["pub_info"],
-                package=zenodo_package,
-                zip_filename=zenodo_zip_filename,
-            )
-            battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
-        for label, label_paths in tracked_outputs.items():
-            for path in label_paths:
-                rel = _rel(path, root_folder)
-                if path.suffix == ".png":
-                    comment = plot_description(label)
-                elif rel.endswith((".parquet", ".csv")):
-                    comment = data_description(label)
-                else:
-                    comment = OUTPUT_MISC_DESCRIPTIONS.get(label)
-                extras = {"rdfs:comment": comment} if comment else None
-                snippet = battinfo.add_data(
-                    rel,
+            if battinfo_xlsx_path:
+                snippet = battinfo.add_input_data(
+                    _rel(battinfo_xlsx_path, root_folder),
                     zenodo_url,
-                    extras=extras,
+                    EXTRA_INPUT_DESCRIPTIONS["battinfo_xlsx"],
                     package=zenodo_package,
                     zip_filename=zenodo_zip_filename,
                 )
                 battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
-        metadata_path = folder / f"metadata.{fcid or sample_id}.json"
-        with metadata_path.open("w", encoding="utf-8") as mf:
-            json.dump(battinfo_json, mf, indent=4, ensure_ascii=False)
-        tracked_outputs["metadata"] = [metadata_path]
+            for path in tracked_extra_inputs.get("pub_info", []):
+                snippet = battinfo.add_input_data(
+                    _rel(path, root_folder),
+                    zenodo_url,
+                    EXTRA_INPUT_DESCRIPTIONS["pub_info"],
+                    package=zenodo_package,
+                    zip_filename=zenodo_zip_filename,
+                )
+                battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
+            for label, label_paths in tracked_outputs.items():
+                for path in label_paths:
+                    rel = _rel(path, root_folder)
+                    if path.suffix == ".png":
+                        comment = plot_description(label)
+                    elif rel.endswith((".parquet", ".csv")):
+                        comment = data_description(label)
+                    else:
+                        comment = OUTPUT_MISC_DESCRIPTIONS.get(label)
+                    extras = {"rdfs:comment": comment} if comment else None
+                    snippet = battinfo.add_data(
+                        rel,
+                        zenodo_url,
+                        extras=extras,
+                        package=zenodo_package,
+                        zip_filename=zenodo_zip_filename,
+                    )
+                    battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
+            metadata_path = folder / f"metadata.{fcid or sample_id}.json"
+            with metadata_path.open("w", encoding="utf-8") as mf:
+                json.dump(battinfo_json, mf, indent=4, ensure_ascii=False)
+            tracked_outputs["metadata"] = [metadata_path]
+    else:
+        reporter.skip("Metadata", "no BattINFO")
 
     return tracked_outputs, tracked_extra_inputs, raw_inputs, fcid, sample_id
 
@@ -1125,13 +1159,14 @@ def merge_summaries(
     return df[cols]
 
 
-def analyse_all_samples(
+def analyse_all_samples(  # noqa: PLR0913
     folder: str | Path,
     *,
     save_format: SAVE_FORMATS = "parquet",
     max_search_depth: int = DEFAULT_DEPTH,
     max_folder_searches: int = DEFAULT_SEARCH,
     zip_output: bool = False,
+    reporter: Reporter | None = None,
 ) -> None:
     """Take a folder and run all analysis.
 
@@ -1140,8 +1175,11 @@ def analyse_all_samples(
     download URL with the in-archive path as a fragment. Otherwise (the default),
     files are left unzipped and "@id"s reference each file's own Zenodo download URL
     directly, for uploading every file individually.
+
+    ``reporter`` is told when each sample and step starts and finishes, to show progress.
     """
     folder = Path(folder).resolve()
+    reporter = reporter or Reporter()
     pub_info, pub_info_path = pub_info_from_root(folder)
     zenodo_package: Literal["zip", "files"] = "zip" if zip_output else "files"
     zip_filename = pub_info.get("zenodo_zip_filename") or f"{folder.name}.zip"
@@ -1162,56 +1200,71 @@ def analyse_all_samples(
     raw_inputs_by_sample_folder: dict[Path, dict[str, list[Path]]] = {}
     fcids_by_sample_folder: dict[Path, str | None] = {}
     sample_ids_by_sample_folder: dict[Path, str] = {}
-    if len(sample_folders) > 1:
-        logger.info("Found %d sample folders:", len(sample_folders))
-    for sample_folder in sample_folders:
-        (
-            tracked_by_sample_folder[sample_folder],
-            tracked_extras_by_sample_folder[sample_folder],
-            raw_inputs_by_sample_folder[sample_folder],
-            fcids_by_sample_folder[sample_folder],
-            sample_ids_by_sample_folder[sample_folder],
-        ) = analyse_sample(
-            sample_folder,
-            save_format=save_format,
-            pub_info=pub_info,
-            pub_info_path=pub_info_path,
-            config=configs_by_sample_folder[sample_folder],
-            root_folder=folder,
-            zenodo_package=zenodo_package,
-        )
-
-    if len(sample_folders) > 1:
-        summaries = find_all_sample_summaries(
-            folder, max_search_depth, max_folder_searches, search_config
-        )
-        df = merge_summaries(summaries, sample_ids_by_sample_folder)
-        writer = pd.ExcelWriter(folder / "combined_summary.xlsx", engine="xlsxwriter")
-        df.to_excel(writer, index=False, sheet_name="Summary")
-        workbook = writer.book
-        worksheet = writer.sheets["Summary"]
-        worksheet.autofit()
-        workbook.close()
-        logger.info("\n🎉 Combined all the results into one big summary")
+    reporter.start(folder, len(sample_folders))
+    for i, sample_folder in enumerate(sample_folders, start=1):
+        name = _rel(sample_folder, folder) if sample_folder != folder else folder.name
+        with reporter.section(f"[{i}/{len(sample_folders)}] {name}"):
+            (
+                tracked_by_sample_folder[sample_folder],
+                tracked_extras_by_sample_folder[sample_folder],
+                raw_inputs_by_sample_folder[sample_folder],
+                fcids_by_sample_folder[sample_folder],
+                sample_ids_by_sample_folder[sample_folder],
+            ) = analyse_sample(
+                sample_folder,
+                save_format=save_format,
+                pub_info=pub_info,
+                pub_info_path=pub_info_path,
+                config=configs_by_sample_folder[sample_folder],
+                root_folder=folder,
+                zenodo_package=zenodo_package,
+                reporter=reporter,
+            )
 
     from pyflowbatt.rocrate_output import write_rocrate  # noqa: PLC0415
 
-    write_rocrate(
-        folder,
-        sample_folders,
-        tracked_by_sample_folder,
-        tracked_extras_by_sample_folder,
-        fcids_by_sample_folder,
-        configs_by_sample_folder,
-        sample_ids_by_sample_folder,
-        raw_inputs_by_sample_folder,
-    )
-    logger.info("📦 Written RO-Crate metadata to %s", folder / "ro-crate-metadata.json")
+    with reporter.section("Finishing"):
+        reporter.plan(
+            [
+                *(["Combined summary"] if len(sample_folders) > 1 else []),
+                "RO-Crate",
+                *(["Zip"] if zip_output else []),
+            ]
+        )
+        if len(sample_folders) > 1:
+            with reporter.task("Combined summary", detail="combined_summary.xlsx"):
+                summaries = find_all_sample_summaries(
+                    folder, max_search_depth, max_folder_searches, search_config
+                )
+                df = merge_summaries(summaries, sample_ids_by_sample_folder)
+                writer = pd.ExcelWriter(folder / "combined_summary.xlsx", engine="xlsxwriter")
+                df.to_excel(writer, index=False, sheet_name="Summary")
+                workbook = writer.book
+                worksheet = writer.sheets["Summary"]
+                worksheet.autofit()
+                workbook.close()
+                logger.debug("Combined all the results into one big summary")
 
-    if zip_output:
-        zip_path = folder.parent / zip_filename
-        zip_folder(folder, zip_path)
-        logger.info("🤐 Zipped everything into %s", zip_path)
+        with reporter.task("RO-Crate", detail="ro-crate-metadata.json"):
+            write_rocrate(
+                folder,
+                sample_folders,
+                tracked_by_sample_folder,
+                tracked_extras_by_sample_folder,
+                fcids_by_sample_folder,
+                configs_by_sample_folder,
+                sample_ids_by_sample_folder,
+                raw_inputs_by_sample_folder,
+            )
+            logger.debug("Written RO-Crate metadata to %s", folder / "ro-crate-metadata.json")
+
+        if zip_output:
+            zip_path = folder.parent / zip_filename
+            with reporter.task("Zip", detail=str(zip_path)):
+                zip_folder(folder, zip_path)
+                logger.debug("Zipped everything into %s", zip_path)
+
+    reporter.finish()
 
 
 def dry_analyse_all_samples(

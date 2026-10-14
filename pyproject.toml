@@ -19,6 +19,7 @@ dependencies = [
     "rocrate>=0.9",
     "yadg>=7.0.1,<8.0.0",
     "tomli>=2.0.0; python_version < '3.11'",
+    "rich>=13.0.0",
 ]
 
 [dependency-groups]
