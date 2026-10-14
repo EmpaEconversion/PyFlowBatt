@@ -78,7 +78,7 @@ def check_model(model: str, summary_params: list[str]) -> tuple[dict[str, str], 
         if param not in units:
             logger.warning(
                 "- EIS summary parameter %s is not in model %s (parameters: %s), so it will "
-                "be missing from the summary. See %s for how to write circuits",
+                "be empty in the summary. See %s for how to write circuits",
                 param,
                 model,
                 ", ".join(units),
