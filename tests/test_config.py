@@ -742,6 +742,9 @@ def _all_download_urls(obj: object) -> set[str]:
         url_value = obj.get("dcat:downloadURL")
         if isinstance(url_value, dict):
             found.add(url_value["@id"])
+        elif isinstance(url_value, str):
+            msg = "dcat:downloadURL is plain string - it should be an object with @id"
+            pytest.fail(msg)
         for v in obj.values():
             found |= _all_download_urls(v)
     elif isinstance(obj, list):
@@ -1777,30 +1780,63 @@ def test_battinfo_eis_data_comment(rel_path: str, frequency_domain: bool) -> Non
     assert comment.startswith("Frequency-domain" if frequency_domain else "Time series")
 
 
-def test_battinfo_distribution_values_are_iris() -> None:
+DCAT_NS = "http://www.w3.org/ns/dcat#"
+BDF_SCHEMA = "https://w3id.org/battery-data-alliance/ontology/battery-data-format/schema"
+
+
+@pytest.mark.parametrize(
+    ("rel_path", "media_type", "table_schema"),
+    [
+        ("s/results/gcpl.bdf.csv", "text/csv", BDF_SCHEMA),
+        ("s/results/gcpl.bdf.parquet", "application/vnd.apache.parquet", BDF_SCHEMA),
+        ("s/s_02_GCPL_A.mpr", "application/octet-stream", None),
+    ],
+)
+def test_battinfo_distribution_values_are_iris(
+    rel_path: str, media_type: str, table_schema: str | None
+) -> None:
     """mediaType, tableSchema, and downloadURL are IRIs."""
     from rdflib import Graph, Namespace, URIRef
 
     from pyflowbatt.battinfo import add_data
 
-    dcat = Namespace("http://www.w3.org/ns/dcat#")
+    dcat = Namespace(DCAT_NS)
     csvw = Namespace("http://www.w3.org/ns/csvw#")
-    dist = add_data("s/results/gcpl.bdf.csv", "https://doi.org/10.5281/zenodo.12345678")
+    dist = add_data(rel_path, "https://doi.org/10.5281/zenodo.12345678")
     doc = {
         "@context": {"@base": "https://example.org/", "dcat": str(dcat), "csvw": str(csvw)},
         **dist["hasOutput"]["dcat:distribution"],
     }
     graph = Graph().parse(data=json.dumps(doc), format="json-ld")
-    file = URIRef("https://example.org/s/results/gcpl.bdf.csv")
+    file = URIRef(f"https://example.org/{rel_path}")
 
-    media_type = graph.value(file, dcat.mediaType)
-    assert media_type == URIRef("http://www.iana.org/assignments/media-types/text/csv")
-    assert graph.value(file, csvw.tableSchema) == URIRef(
-        "https://w3id.org/battery-data-alliance/ontology/battery-data-format/schema"
+    assert graph.value(file, dcat.mediaType) == URIRef(
+        f"http://www.iana.org/assignments/media-types/{media_type}"
     )
+    expected_schema = URIRef(table_schema) if table_schema else None
+    assert graph.value(file, csvw.tableSchema) == expected_schema
     download_url = graph.value(file, dcat.downloadURL)
     assert isinstance(download_url, URIRef)
     assert str(download_url).startswith("https://zenodo.org/")
+
+
+def test_battinfo_zenodo_access_urls_are_iris() -> None:
+    """Zenodo accessURL and endpointURL are IRIs."""
+    from rdflib import Graph, Namespace, URIRef
+
+    from pyflowbatt.battinfo import add_zenodo_url
+
+    dcat = Namespace(DCAT_NS)
+    output = add_zenodo_url("https://doi.org/10.5281/zenodo.12345678")["hasOutput"]
+    doc = {"@context": {"dcat": str(dcat)}, **output}
+    graph = Graph().parse(data=json.dumps(doc), format="json-ld")
+
+    assert list(graph.objects(None, dcat.accessURL)) == [
+        URIRef("https://doi.org/10.5281/zenodo.12345678")
+    ]
+    assert list(graph.objects(None, dcat.endpointURL)) == [
+        URIRef("https://zenodo.org/api/records/12345678")
+    ]
 
 
 def test_template_every_single_hash_line_uncomments_to_valid_toml(
