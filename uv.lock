@@ -1629,6 +1629,7 @@ dependencies = [
 dev = [
     { name = "pre-commit" },
     { name = "pytest" },
+    { name = "rdflib" },
     { name = "ruff" },
 ]
 
@@ -1650,6 +1651,7 @@ requires-dist = [
 dev = [
     { name = "pre-commit", specifier = ">=4.2.0" },
     { name = "pytest", specifier = ">=8.4.2" },
+    { name = "rdflib", specifier = ">=7.6.0" },
     { name = "ruff", specifier = ">=0.13.2" },
 ]
 
