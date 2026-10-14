@@ -686,8 +686,8 @@ def add_zenodo_url(
         "@context": [{"@base": base}],
         "@type": "BatteryTest",
         "hasOutput": {
-            "dcat:accessURL": zenodo_doi_url,
-            "dcat:endpointURL": f"https://zenodo.org/api/records/{record_id}",
+            "dcat:accessURL": {"@id": zenodo_doi_url},
+            "dcat:endpointURL": {"@id": f"https://zenodo.org/api/records/{record_id}"},
         },
     }
 
