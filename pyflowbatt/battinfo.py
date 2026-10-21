@@ -361,6 +361,96 @@ def dedupe_jsonld_list(lst: list) -> list:
     return deduped
 
 
+# Keys whose values from every source are combined instead of the higher priority one winning
+UNION_KEYS = {"@type", "dcat:distribution"}
+
+
+def _short(value: object, limit: int = 150) -> str:
+    """Compact one-line JSON for log messages."""
+    text = json.dumps(value, ensure_ascii=False)
+    return text if len(text) <= limit else text[:limit] + "..."
+
+
+def _union(high: object, low: object, names: tuple[str, str] | None, path: str) -> object:
+    """Combine two values or lists, merging nodes that share an @id."""
+    merged = deepcopy(high) if isinstance(high, list) else [deepcopy(high)]
+    for item in low if isinstance(low, list) else [low]:
+        match = next(
+            (
+                i
+                for i, existing in enumerate(merged)
+                if isinstance(item, dict)
+                and isinstance(existing, dict)
+                and item.get("@id") is not None
+                and existing.get("@id") == item.get("@id")
+            ),
+            None,
+        )
+        if match is not None:
+            merged[match] = priority_merge(merged[match], item, names=names, _path=path)
+        elif item not in merged:
+            merged.append(deepcopy(item))
+    return merged[0] if len(merged) == 1 else merged
+
+
+def priority_merge(
+    high: dict,
+    low: dict,
+    *,
+    names: tuple[str, str] | None = None,
+    _path: str = "",
+) -> dict:
+    """Merge two JSON-LD nodes, keeping the values of `high` where both set a key.
+
+    Keys in UNION_KEYS are combined instead, and @context blocks are merged. `names`
+    labels the two sources in a warning logged for each disagreement, None merges silently.
+    """
+    merged = deepcopy(high)
+    for key, low_value in low.items():
+        path = f"{_path}/{key}"
+        if key not in merged:
+            merged[key] = deepcopy(low_value)
+            continue
+        high_value = merged[key]
+        if key == "@context":
+            merged[key] = merge_contexts_strict(high_value, low_value, on_conflict="keep_left")
+        elif key in UNION_KEYS:
+            merged[key] = _union(high_value, low_value, names, path)
+        elif (
+            isinstance(high_value, dict)
+            and isinstance(low_value, dict)
+            and high_value.get("@id") == low_value.get("@id")
+        ):
+            merged[key] = priority_merge(high_value, low_value, names=names, _path=path)
+        elif high_value != low_value and names:
+            logger.warning(
+                "%s and %s disagree at %s, using %s: %s, ignoring: %s",
+                *names,
+                path.lstrip("/"),
+                names[0],
+                _short(high_value),
+                _short(low_value),
+            )
+    return merged
+
+
+def resolve_zenodo_url(battinfo_jsonld: dict, pub_info_url: str | None) -> str | None:
+    """Zenodo DOI URL of the dataset, from the BattINFO sheet or else publication info.
+
+    Raises ValueError if the two name different Zenodo records.
+    """
+    output = battinfo_jsonld.get("hasOutput")
+    access = output.get("dcat:accessURL") if isinstance(output, dict) else None
+    sheet_url = access.get("@id") if isinstance(access, dict) else access
+    if sheet_url and pub_info_url and zenodo_record_id(sheet_url) != zenodo_record_id(pub_info_url):
+        msg = (
+            f"Zenodo record mismatch: the BattINFO sheet gives {sheet_url} "
+            f"but publication info gives {pub_info_url}"
+        )
+        raise ValueError(msg)
+    return sheet_url or pub_info_url
+
+
 def make_test_object(battinfo_jsonld: dict) -> dict:
     """Put BattINFO redox flow battery description inside a BatteryTest object."""
     if battinfo_jsonld.get("@type") == "RedoxFlowBattery":
@@ -794,14 +884,14 @@ def add_institution(
     inst_dict = {
         "@type": "BatteryTest",
         "hasOutput": {
-            "dc:publisher": {
+            "dcterms:publisher": {
                 "@type": "schema:ResearchOrganization",
             },
         },
     }
     if wikidata_url:
-        inst_dict["hasOutput"]["dc:publisher"]["@id"] = wikidata_url
-    inst_dict["hasOutput"]["dc:publisher"]["schema:name"] = name
+        inst_dict["hasOutput"]["dcterms:publisher"]["@id"] = wikidata_url
+    inst_dict["hasOutput"]["dcterms:publisher"]["schema:name"] = name
     return inst_dict
 
 

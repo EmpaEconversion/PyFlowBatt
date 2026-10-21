@@ -788,6 +788,118 @@ def test_analyse_sample_default_package_is_files_and_root_relative(
     assert local_terms["@base"] == "https://zenodo.org/records/20338409/"
 
 
+SHEET_ZENODO_URL = "https://doi.org/10.5281/zenodo.20338409"
+
+
+def _fake_convert_with_references(_file: Path) -> dict:
+    """Return converter output with @References included, the cell nested in a BatteryTest."""
+    return {
+        "@context": {},
+        "@type": "BatteryTest",
+        "hasTestObject": {
+            "@type": "RedoxFlowBattery",
+            "schema:productID": "empa__fcid123456",
+            "schema:name": "battinfo-derived-name",
+        },
+        "hasOutput": {
+            "@type": ["BatteryTestResult", "dcat:Dataset"],
+            "dcterms:creator": {
+                "@type": "schema:Person",
+                "@id": "https://orcid.org/0000-0000-0000-0001",
+                "schema:name": "Sheet Author",
+            },
+            "dcterms:issued": "2026-08-05",
+            "dcat:accessURL": {"@id": SHEET_ZENODO_URL},
+        },
+    }
+
+
+def test_analyse_sample_sheet_references_take_priority_over_pub_info(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The sheet beats pub_info, which only fills gaps, and pyflowbatt defaults come last."""
+    from pyflowbatt import analysis as analysis_module
+
+    root = tmp_path / "project"
+    sample = root / "sample_01"
+    sample.mkdir(parents=True)
+    (sample / "metadata.xlsx").write_text("x")
+    monkeypatch.setattr(analysis_module, "convert_excel_to_jsonld", _fake_convert_with_references)
+
+    pub_info = {
+        "zenodo_doi_url": SHEET_ZENODO_URL,
+        "citation_string": "Cite me",
+        "authors": [
+            {
+                "name": "Pub Author",
+                "orcid": "https://orcid.org/0000-0000-0000-0002",
+                "affiliation": ["Empa"],
+            }
+        ],
+        "institutions": {"Empa": {"wikidata_url": "http://www.wikidata.org/entity/Q683116"}},
+    }
+    config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
+    with caplog.at_level("WARNING", logger="pyflowbatt"):
+        analysis_module.analyse_sample(
+            sample, save_format=None, config=config, root_folder=root, pub_info=pub_info
+        )
+
+    metadata = json.loads((sample / "metadata.empa__fcid123456.json").read_text())
+    output = metadata["hasOutput"]
+    assert output["dcterms:creator"]["schema:name"] == "Sheet Author"
+    assert output["dcterms:issued"] == "2026-08-05"
+    assert output["schema:citation"] == "Cite me"
+    assert output["dcat:endpointURL"] == {"@id": "https://zenodo.org/api/records/20338409"}
+    messages = [r.getMessage() for r in caplog.records if r.name == "pyflowbatt.battinfo"]
+    assert len(messages) == 1
+    assert "hasOutput/dcterms:creator" in messages[0]
+
+
+def test_analyse_sample_zenodo_record_from_sheet_without_pub_info(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sheet's Dataset URL sets @base and download URLs when there is no pub_info."""
+    from pyflowbatt import analysis as analysis_module
+
+    root = tmp_path / "project"
+    sample = root / "sample_01"
+    sample.mkdir(parents=True)
+    (sample / "metadata.xlsx").write_text("x")
+    monkeypatch.setattr(analysis_module, "convert_excel_to_jsonld", _fake_convert_with_references)
+
+    config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
+    analysis_module.analyse_sample(sample, save_format=None, config=config, root_folder=root)
+
+    metadata = json.loads((sample / "metadata.empa__fcid123456.json").read_text())
+    local_terms = next(c for c in metadata["@context"] if isinstance(c, dict))
+    assert local_terms["@base"] == "https://zenodo.org/records/20338409/"
+    expected = "https://zenodo.org/records/20338409/files/sample_01/metadata.xlsx"
+    assert expected in _all_download_urls(metadata)
+
+
+def test_analyse_sample_raises_on_zenodo_record_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sheet and pub_info naming different Zenodo records is an error."""
+    from pyflowbatt import analysis as analysis_module
+
+    root = tmp_path / "project"
+    sample = root / "sample_01"
+    sample.mkdir(parents=True)
+    (sample / "metadata.xlsx").write_text("x")
+    monkeypatch.setattr(analysis_module, "convert_excel_to_jsonld", _fake_convert_with_references)
+
+    config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
+    with pytest.raises(ValueError, match="Zenodo record mismatch"):
+        analysis_module.analyse_sample(
+            sample,
+            save_format=None,
+            config=config,
+            root_folder=root,
+            pub_info={"zenodo_doi_url": "https://doi.org/10.5281/zenodo.99999999"},
+        )
+
+
 def test_analyse_sample_records_pub_info_xlsx_as_input(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1920,6 +2032,115 @@ def test_battinfo_zenodo_access_urls_are_iris() -> None:
     assert list(graph.objects(None, dcat.endpointURL)) == [
         URIRef("https://zenodo.org/api/records/12345678")
     ]
+
+
+def test_priority_merge_keeps_high_fills_gaps_and_warns(caplog: pytest.LogCaptureFixture) -> None:
+    """On a disagreement the high value wins with a warning, missing keys come from low."""
+    from pyflowbatt.battinfo import priority_merge
+
+    high = {"@type": "BatteryTest", "hasOutput": {"dcterms:issued": "2026-08-05"}}
+    low = {
+        "@type": "BatteryTest",
+        "hasOutput": {"dcterms:issued": "2026-10-21", "schema:citation": "Cite me"},
+    }
+    with caplog.at_level("WARNING", logger="pyflowbatt"):
+        merged = priority_merge(high, low, names=("sheet", "pub"))
+
+    assert merged["hasOutput"] == {"dcterms:issued": "2026-08-05", "schema:citation": "Cite me"}
+    messages = [r.getMessage() for r in caplog.records]
+    assert len(messages) == 1
+    assert "sheet and pub disagree at hasOutput/dcterms:issued" in messages[0]
+
+
+def test_priority_merge_without_names_is_silent(caplog: pytest.LogCaptureFixture) -> None:
+    """Without source names, disagreements are resolved without a warning."""
+    from pyflowbatt.battinfo import priority_merge
+
+    with caplog.at_level("WARNING", logger="pyflowbatt"):
+        merged = priority_merge({"a": 1}, {"a": 2})
+    assert merged == {"a": 1}
+    assert caplog.records == []
+
+
+def test_priority_merge_keeps_high_list_whole() -> None:
+    """A list from high replaces the one from low, e.g. an ordered author list."""
+    from pyflowbatt.battinfo import priority_merge
+
+    author_a = {"@id": "https://orcid.org/a", "schema:name": "A"}
+    author_b = {"@id": "https://orcid.org/b", "schema:name": "B"}
+    merged = priority_merge(
+        {"dcterms:creator": [author_a]}, {"dcterms:creator": [author_b, author_a]}
+    )
+    assert merged["dcterms:creator"] == [author_a]
+
+
+def test_priority_merge_nodes_by_id() -> None:
+    """Nodes with the same @id are merged, a different @id keeps the high node."""
+    from pyflowbatt.battinfo import priority_merge
+
+    high = {
+        "dcterms:publisher": {"@id": "http://www.wikidata.org/entity/Q683116"},
+        "dcat:accessURL": {"@id": "https://doi.org/10.5281/zenodo.1"},
+    }
+    low = {
+        "dcterms:publisher": {
+            "@id": "http://www.wikidata.org/entity/Q683116",
+            "schema:name": "Empa",
+        },
+        "dcat:accessURL": {"@id": "https://doi.org/10.5281/zenodo.2"},
+    }
+    merged = priority_merge(high, low)
+    assert merged["dcterms:publisher"] == {
+        "@id": "http://www.wikidata.org/entity/Q683116",
+        "schema:name": "Empa",
+    }
+    assert merged["dcat:accessURL"] == {"@id": "https://doi.org/10.5281/zenodo.1"}
+
+
+def test_priority_merge_combines_types_and_distributions() -> None:
+    """@type and dcat:distribution are combined, files with the same @id merge into one node."""
+    from pyflowbatt.battinfo import priority_merge
+
+    high = {
+        "@type": ["BatteryTestResult"],
+        "dcat:distribution": [{"@id": "a.csv", "rdfs:comment": "From the sheet"}],
+    }
+    low = {
+        "@type": "dcat:Dataset",
+        "dcat:distribution": [
+            {"@id": "a.csv", "rdfs:comment": "From pyflowbatt", "dcat:downloadURL": {"@id": "u"}},
+            {"@id": "b.csv"},
+        ],
+    }
+    merged = priority_merge(high, low)
+    assert merged["@type"] == ["BatteryTestResult", "dcat:Dataset"]
+    assert merged["dcat:distribution"] == [
+        {"@id": "a.csv", "rdfs:comment": "From the sheet", "dcat:downloadURL": {"@id": "u"}},
+        {"@id": "b.csv"},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("sheet_url", "pub_info_url", "expected"),
+    [
+        ("https://doi.org/10.5281/zenodo.1", None, "https://doi.org/10.5281/zenodo.1"),
+        (None, "https://doi.org/10.5281/zenodo.2", "https://doi.org/10.5281/zenodo.2"),
+        (
+            "https://doi.org/10.5281/zenodo.1",
+            "https://doi.org/10.5281/zenodo.1",
+            "https://doi.org/10.5281/zenodo.1",
+        ),
+        (None, None, None),
+    ],
+)
+def test_resolve_zenodo_url(
+    sheet_url: str | None, pub_info_url: str | None, expected: str | None
+) -> None:
+    """The sheet's Dataset URL is used first, then publication info."""
+    from pyflowbatt.battinfo import resolve_zenodo_url
+
+    sheet = {"hasOutput": {"dcat:accessURL": {"@id": sheet_url}}} if sheet_url else {}
+    assert resolve_zenodo_url(sheet, pub_info_url) == expected
 
 
 def test_template_every_single_hash_line_uncomments_to_valid_toml(

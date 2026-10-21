@@ -516,12 +516,14 @@ def analyse_sample(
     "@id" alone.
 
     ``pub_info_path`` is the xlsx ``pub_info`` was parsed from; when given it is recorded
-    as an input alongside the protocol and BattINFO xlsx files.
+    as an input alongside the protocol and BattINFO xlsx files. Dataset details from the
+    BattINFO sheet take priority over ``pub_info``, which takes priority over defaults.
 
     ``zenodo_package`` controls how the resolved "dcat:downloadURL" (a separate property
-    from "@id") points at Zenodo-hosted files, once ``pub_info["zenodo_doi_url"]`` is
-    known: "files" (default) points directly at each file's own Zenodo download URL
-    (matching an unzipped upload); "zip" points at one zip's Zenodo download URL with the
+    from "@id") points at Zenodo-hosted files, once the Zenodo record is known from the
+    BattINFO sheet's Dataset URL or ``pub_info["zenodo_doi_url"]``: "files" (default)
+    points directly at each file's own Zenodo download URL (matching an unzipped
+    upload); "zip" points at one zip's Zenodo download URL with the
     in-archive path as a fragment (see :func:`pyflowbatt.battinfo.zenodo_download_url`).
 
     ``reporter`` is told when each step starts and finishes, to show progress.
@@ -597,6 +599,7 @@ def analyse_sample(
     battinfo_json = None
     battinfo_sample_id = None
     battinfo_cell: dict | None = None
+    zenodo_url: str | None = None
     if not battinfo_files:
         logger.debug("No BattINFO xlsx found, skipping")
         reporter.skip("BattINFO", "no xlsx")
@@ -614,43 +617,48 @@ def analyse_sample(
                 battinfo_cell = battinfo_json["hasTestObject"]
                 fcid = battinfo_cell["schema:productID"]
                 battinfo_sample_id = battinfo_cell["schema:name"]
+                zenodo_url = battinfo.resolve_zenodo_url(
+                    battinfo_json, pub_info.get("zenodo_doi_url")
+                )
 
-                # Create list of everything that can be included in JSON-LD
-                merge_list = [
+                # Publication info only fills what the BattINFO sheet leaves out
+                pub_list: list[dict] = [{"@type": "BatteryTest"}]
+                if zenodo_url:
+                    pub_list.append(battinfo.add_zenodo_url(zenodo_url))
+                if pub_info.get("citation_string"):
+                    pub_list.append(battinfo.add_citation(pub_info["citation_string"]))
+                if pub_info.get("institution"):
+                    pub_list.append(
+                        battinfo.add_institution(
+                            pub_info["institution"],
+                            pub_info.get("institutions", {})
+                            .get(pub_info["institution"], {})
+                            .get("wikidata_url"),
+                        )
+                    )
+                if pub_info.get("authors") and pub_info.get("institutions"):
+                    pub_list.append(
+                        battinfo.add_authors(pub_info["authors"], pub_info["institutions"]),
+                    )
+                if pub_info.get("sample_to_fig"):
+                    pub_list.append(
+                        battinfo.add_associated_media(
+                            pub_info.get("publication_doi_url"),
+                            pub_info["sample_to_fig"],
+                            fcid,
+                            battinfo_sample_id,
+                        ),
+                    )
+                defaults = battinfo.merge_jsonld_on_type(
+                    [battinfo.add_input_and_output(), battinfo.add_software()]
+                )
+
+                battinfo_json = battinfo.priority_merge(
                     battinfo_json,
-                    battinfo.add_input_and_output(),
-                    battinfo.add_software(),
-                ]
-                if pub_info:
-                    if pub_info.get("zenodo_doi_url"):
-                        merge_list.append(battinfo.add_zenodo_url(pub_info["zenodo_doi_url"]))
-                    if pub_info.get("citation_string"):
-                        merge_list.append(battinfo.add_citation(pub_info["citation_string"]))
-                    if pub_info.get("institution"):
-                        merge_list.append(
-                            battinfo.add_institution(
-                                pub_info["institution"],
-                                pub_info.get("institutions", {})
-                                .get(pub_info["institution"], {})
-                                .get("wikidata_url"),
-                            )
-                        )
-                    if pub_info.get("authors") and pub_info.get("institutions"):
-                        merge_list.append(
-                            battinfo.add_authors(pub_info["authors"], pub_info["institutions"]),
-                        )
-                    if pub_info.get("sample_to_fig"):
-                        merge_list.append(
-                            battinfo.add_associated_media(
-                                pub_info.get("publication_doi_url"),
-                                pub_info["sample_to_fig"],
-                                fcid,
-                                battinfo_sample_id,
-                            ),
-                        )
-
-                # Merge everything
-                battinfo_json = battinfo.merge_jsonld_on_type(merge_list)
+                    battinfo.merge_jsonld_on_type(pub_list),
+                    names=("BattINFO sheet", "publication info"),
+                )
+                battinfo_json = battinfo.priority_merge(battinfo_json, defaults)
                 break
             else:
                 logger.warning("Couldn't convert any xlsx to BattINFO, no metadata written")
@@ -968,7 +976,6 @@ def analyse_sample(
 
     if battinfo_json is not None:
         with reporter.task("Metadata"):
-            zenodo_url = pub_info.get("zenodo_doi_url") if pub_info else None
             zenodo_zip_filename = pub_info.get("zenodo_zip_filename") or f"{root_folder.name}.zip"
             for label, paths in raw_inputs.items():
                 for path in paths:
