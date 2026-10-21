@@ -1001,7 +1001,7 @@ def _make_raw_battinfo_json(
                     "hasMeasurementUnit": unit,
                 }
             )
-        return {"Substrate": {"hasMeasuredProperty": properties}}
+        return {"hasSubstrate": {"hasMeasuredProperty": properties}}
 
     raw_json = {
         "@context": {},
@@ -1018,6 +1018,17 @@ def _make_raw_battinfo_json(
             "hasMeasurementUnit": resistance_unit,
         }
     return raw_json
+
+
+def _wrap_in_battery_test(raw_json: dict) -> dict:
+    """Nest a cell in a BatteryTest."""
+    cell = dict(raw_json)
+    return {
+        "@context": cell.pop("@context"),
+        "@type": "BatteryTest",
+        "hasTestObject": cell,
+        "hasOutput": {"@type": ["BatteryTestResult", "dcat:Dataset"], "dcterms:title": "x"},
+    }
 
 
 def test_get_area_cm2_default_no_toml_no_battinfo() -> None:
@@ -1041,6 +1052,16 @@ def test_get_area_cm2_from_battinfo_picks_smaller_when_electrodes_disagree() -> 
     from pyflowbatt.analysis import get_area_cm2
 
     raw_json = _make_raw_battinfo_json(pos_area=5.0, neg_area=4.0)
+    assert get_area_cm2(PyFlowBattConfig(), raw_json) == 4.0
+
+
+def test_get_area_cm2_from_legacy_substrate_key() -> None:
+    """Old schemas had "Substrate" not "hasSubstrate" keys."""
+    from pyflowbatt.analysis import get_area_cm2
+
+    raw_json = _make_raw_battinfo_json(pos_area=4.0, neg_area=4.0)
+    for electrode in ("hasPositiveElectrode", "hasNegativeElectrode"):
+        raw_json[electrode]["Substrate"] = raw_json[electrode].pop("hasSubstrate")
     assert get_area_cm2(PyFlowBattConfig(), raw_json) == 4.0
 
 
@@ -1246,6 +1267,68 @@ def test_analyse_sample_raises_on_toml_battinfo_resistance_conflict(
     config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
     with pytest.raises(ValueError, match="Assembled resistance mismatch"):
         analysis_module.analyse_sample(sample, save_format=None, config=config)
+
+
+def test_analyse_sample_reads_cell_nested_in_battery_test(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ID, name, area and resistance are read from a cell nested in a BatteryTest."""
+    import pandas as pd
+
+    from pyflowbatt import analysis as analysis_module
+
+    sample = tmp_path / "not-a-normal-sample-name"
+    sample.mkdir()
+    (sample / "sample_03_LSV_A.mpr").write_text("x")
+    (sample / "metadata.xlsx").write_text("x")  # content irrelevant; conversion is stubbed
+
+    raw_json = _make_raw_battinfo_json(
+        pos_area=4.0,
+        neg_area=4.0,
+        unit="SquareCentiMetre",
+        resistance_value=25000,
+        resistance_unit="Ohm",
+    )
+    nested = _wrap_in_battery_test(raw_json)
+    monkeypatch.setattr(analysis_module, "convert_excel_to_jsonld", lambda _file: nested)
+
+    captured_areas: list[float] = []
+
+    def fake_analyse(filepath: Path, area_cm2: float = 5) -> dict:
+        captured_areas.append(area_cm2)
+        return {
+            "Fit cutoff current / A": 0.0,
+            "Intercept / A": 0.0,
+            "Slope / Ω⁻¹": 1.0,
+            "Resistance / Ω": 1.0,
+            "Area / cm²": area_cm2,
+            "Area specific resistance / Ω cm²": area_cm2,
+            "File name": Path(filepath).name,
+        }
+
+    def fake_plot(df: pd.DataFrame, results: dict) -> tuple:
+        import matplotlib.pyplot as plt
+
+        return plt.subplots()
+
+    monkeypatch.setattr(analysis_module, "read_to_bdf", lambda file: file)
+    monkeypatch.setattr(analysis_module.lsv, "analyse", fake_analyse)
+    monkeypatch.setattr(analysis_module.lsv, "plot", fake_plot)
+
+    config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
+    _outputs, _extra_inputs, _raw_inputs, fcid, sample_id = analysis_module.analyse_sample(
+        sample, save_format=None, config=config
+    )
+
+    assert fcid == "FCID1"
+    assert sample_id == "battinfo-name"
+    assert captured_areas == [4.0]
+    df = pd.read_excel(sample / "results" / "summary.xlsx", sheet_name="Summary", index_col=0)
+    assert df.loc["Assembled resistance / Ω", "Value"] == 25000.0
+    metadata = json.loads((sample / "metadata.FCID1.json").read_text(encoding="utf-8"))
+    assert metadata["@type"] == "BatteryTest"
+    assert metadata["hasTestObject"]["schema:productID"] == "FCID1"
+    assert metadata["hasOutput"]["dcterms:title"] == "x"
 
 
 def test_area_cm2_passed_to_lsv_analyse(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

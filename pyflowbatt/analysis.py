@@ -357,7 +357,7 @@ def _extract_electrode_area_cm2(raw_battinfo_json: dict, electrode_key: str) -> 
     electrode = raw_battinfo_json.get(electrode_key)
     if not isinstance(electrode, dict):
         return None
-    substrate = electrode.get("Substrate")
+    substrate = electrode.get("hasSubstrate") or electrode.get("Substrate")  # old schema name
     if not isinstance(substrate, dict):
         return None
     properties = substrate.get("hasMeasuredProperty") or []
@@ -596,7 +596,7 @@ def analyse_sample(
 
     battinfo_json = None
     battinfo_sample_id = None
-    raw_battinfo_json: dict | None = None
+    battinfo_cell: dict | None = None
     if not battinfo_files:
         logger.debug("No BattINFO xlsx found, skipping")
         reporter.skip("BattINFO", "no xlsx")
@@ -609,10 +609,11 @@ def analyse_sample(
                 if raw_json is None:
                     continue
                 battinfo_xlsx_path = file
-                fcid = raw_json["schema:productID"]
-                battinfo_sample_id = raw_json["schema:name"]
-                raw_battinfo_json = raw_json
+                # The cell might already be in a BatteryTest
                 battinfo_json = battinfo.make_test_object(raw_json)
+                battinfo_cell = battinfo_json["hasTestObject"]
+                fcid = battinfo_cell["schema:productID"]
+                battinfo_sample_id = battinfo_cell["schema:name"]
 
                 # Create list of everything that can be included in JSON-LD
                 merge_list = [
@@ -655,9 +656,9 @@ def analyse_sample(
                 logger.warning("Couldn't convert any xlsx to BattINFO, no metadata written")
 
     sample_id = get_sampleid_from_folderpath(folder, config, battinfo_sample_id)
-    area_cm2 = get_area_cm2(config, raw_battinfo_json)
+    area_cm2 = get_area_cm2(config, battinfo_cell)
     assembled_resistance_ohm = get_assembled_resistance_ohm(
-        config, raw_battinfo_json, gcpl_files[0].stem if gcpl_files else None
+        config, battinfo_cell, gcpl_files[0].stem if gcpl_files else None
     )
 
     av_ocv = (np.nan, np.nan)
