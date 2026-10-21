@@ -81,16 +81,16 @@ wheels = [
 
 [[package]]
 name = "battinfoconverter-backend"
-version = "3.3.1"
+version = "3.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "openpyxl" },
     { name = "pandas" },
     { name = "simplejson" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ba/cb/fd73f52e4b84d7e2ba448f485e9a51e80606f985bca6d86437132daa3874/battinfoconverter_backend-3.3.1.tar.gz", hash = "sha256:ce2ebfd4752a712874f4b423d6ab7f6f78b0a1a8fa8e16bbf461d7a1ebda7724", size = 128462, upload-time = "2026-09-18T16:15:20.836Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/36/91/467a79d7d9acebc997942031e9243c6900680efc5ec6125a0d5f64282f01/battinfoconverter_backend-3.4.0.tar.gz", hash = "sha256:b42d0fb85515ae94ae1d5558ab424a0637bffbf7fc998bdd98fc8b5cc36b2a04", size = 152286, upload-time = "2026-10-16T13:34:01.767Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d8/25/32f77c9e4d72d83492fb619762865df1fcf6089ce868a9735331056812e0/battinfoconverter_backend-3.3.1-py3-none-any.whl", hash = "sha256:47e0f5cb0cc6c8fa772ae819ae03d700c43c61d006604d77593bdc02a1c9b946", size = 127360, upload-time = "2026-09-18T16:15:19.4Z" },
+    { url = "https://files.pythonhosted.org/packages/4c/49/d3adeb042c3b5b4331946be2f9239be08ec4d3ddd95dbdcc12a791de16e3/battinfoconverter_backend-3.4.0-py3-none-any.whl", hash = "sha256:a25ad5b33fc0a0c41e0ead9ed570f574f09082999d79fc10abc1685c7dc6677c", size = 143728, upload-time = "2026-10-16T13:34:00.402Z" },
 ]
 
 [[package]]
@@ -1637,7 +1637,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "batterydf", specifier = ">=0.1.0,<0.2.0" },
-    { name = "battinfoconverter-backend", specifier = ">=3.3.1" },
+    { name = "battinfoconverter-backend", specifier = ">=3.4.0,<4.0.0" },
     { name = "fasteis", specifier = "==0.1.0" },
     { name = "matplotlib", specifier = ">=3.10.6" },
     { name = "pandas", specifier = ">=2.3.2" },
