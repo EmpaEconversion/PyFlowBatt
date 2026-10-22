@@ -917,6 +917,10 @@ def test_analyse_sample_owns_file_list_and_keeps_sheet_descriptions(
             {"@id": f"{zip_url}#sample_01/metadata.xlsx", "rdfs:comment": "Sheet description"},
             {"@id": f"{zip_url}#empa__fcid000001/data.parquet", "rdfs:comment": "Other cell"},
         ]
+        jsonld["hasInput"] = {
+            "@type": ["RawData", "dcat:Dataset"],
+            "dcat:distribution": {"@id": f"{zip_url}#empa__fcid000001/raw.mpr"},
+        }
         return jsonld
 
     monkeypatch.setattr(analysis_module, "convert_excel_to_jsonld", fake_convert)
@@ -941,6 +945,7 @@ def test_analyse_sample_owns_file_list_and_keeps_sheet_descriptions(
     xlsx = next(d for d in (inputs if isinstance(inputs, list) else [inputs]))
     assert xlsx["@id"] == "sample_01/metadata.xlsx"
     assert xlsx["rdfs:comment"] == "Sheet description"
+    assert metadata["hasInput"]["@type"] == "dcat:Dataset"
     assert "lists empa__fcid000001/data.parquet, which is not a file" in caplog.text
 
 
@@ -958,7 +963,7 @@ def test_pop_sheet_files_recovers_paths(node: dict, expected: str) -> None:
 
     jsonld = {"hasInput": {"@type": "dcat:Dataset", "dcat:distribution": node}}
     assert pop_sheet_files(jsonld) == {expected: None}
-    assert jsonld == {"hasInput": {"@type": "dcat:Dataset"}}
+    assert jsonld == {}
 
 
 def test_analyse_sample_records_pub_info_xlsx_as_input(

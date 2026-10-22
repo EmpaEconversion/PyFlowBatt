@@ -480,6 +480,9 @@ def pop_sheet_files(battinfo_jsonld: dict) -> dict[str, str | None]:
             path = _sheet_file_path(item) if isinstance(item, dict) else None
             if path:
                 files[path] = item.get("rdfs:comment")
+        # A section that only described files would leave its @type on pyflowbatt's files
+        if set(node) <= {"@type"}:
+            del battinfo_jsonld[section]
     return files
 
 
@@ -655,11 +658,13 @@ def add_input_data(
     *,
     zip_filename: str | None = None,
 ) -> dict:
-    """Add links to raw input files to the hasInput section of json-ld output.
+    """Add links to input files, like protocols and metadata sheets, to the hasInput section.
+
+    Raw data files are outputs of the BatteryTest, see :func:`add_data`.
 
     Args:
         rel_file_path: path to file relative to the root folder uploaded to Zenodo,
-            e.g. sample_01/cell01_GCPL_01.mpr
+            e.g. sample_01/cell01_GCPL.mps
         zenodo_doi_url: optional Zenodo archive URL
         comment: human-readable description of what this file is
         zip_filename: see :func:`zenodo_download_url`
@@ -682,7 +687,7 @@ def add_input_data(
     return {
         "@type": "BatteryTest",
         "hasInput": {
-            "@type": ["RawData", "dcat:Dataset"],
+            "@type": "dcat:Dataset",
             "dcat:distribution": dist,
         },
     }
