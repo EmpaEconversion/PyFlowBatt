@@ -600,6 +600,7 @@ def analyse_sample(
     battinfo_sample_id = None
     battinfo_cell: dict | None = None
     zenodo_url: str | None = None
+    sheet_files: dict[str, str | None] = {}
     if not battinfo_files:
         logger.debug("No BattINFO xlsx found, skipping")
         reporter.skip("BattINFO", "no xlsx")
@@ -617,6 +618,8 @@ def analyse_sample(
                 battinfo_cell = battinfo_json["hasTestObject"]
                 fcid = battinfo_cell["schema:productID"]
                 battinfo_sample_id = battinfo_cell["schema:name"]
+                # pyflowbatt lists the files it finds, the sheet only adds descriptions
+                sheet_files = battinfo.pop_sheet_files(battinfo_json)
                 zenodo_url = battinfo.resolve_zenodo_url(
                     battinfo_json, pub_info.get("zenodo_doi_url")
                 )
@@ -977,39 +980,33 @@ def analyse_sample(
     if battinfo_json is not None:
         with reporter.task("Metadata"):
             zenodo_zip_filename = pub_info.get("zenodo_zip_filename") or f"{root_folder.name}.zip"
+
+            def describe(rel: str, default: str | None) -> str | None:
+                """Prefer the BattINFO sheet's description of a file over pyflowbatt's."""
+                return sheet_files.pop(rel, None) or default
+
             for label, paths in raw_inputs.items():
                 for path in paths:
+                    rel = _rel(path, root_folder)
                     snippet = battinfo.add_data(
-                        _rel(path, root_folder),
+                        rel,
                         zenodo_url,
-                        extras={"rdfs:comment": raw_description(label, path)},
+                        extras={"rdfs:comment": describe(rel, raw_description(label, path))},
                         package=zenodo_package,
                         zip_filename=zenodo_zip_filename,
                     )
                     battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
-            for path in mps_files:
+            input_files = [
+                *((path, "protocol") for path in mps_files),
+                *((path, "battinfo_xlsx") for path in [battinfo_xlsx_path] if path),
+                *((path, "pub_info") for path in tracked_extra_inputs.get("pub_info", [])),
+            ]
+            for path, label in input_files:
+                rel = _rel(path, root_folder)
                 snippet = battinfo.add_input_data(
-                    _rel(path, root_folder),
+                    rel,
                     zenodo_url,
-                    EXTRA_INPUT_DESCRIPTIONS["protocol"],
-                    package=zenodo_package,
-                    zip_filename=zenodo_zip_filename,
-                )
-                battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
-            if battinfo_xlsx_path:
-                snippet = battinfo.add_input_data(
-                    _rel(battinfo_xlsx_path, root_folder),
-                    zenodo_url,
-                    EXTRA_INPUT_DESCRIPTIONS["battinfo_xlsx"],
-                    package=zenodo_package,
-                    zip_filename=zenodo_zip_filename,
-                )
-                battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
-            for path in tracked_extra_inputs.get("pub_info", []):
-                snippet = battinfo.add_input_data(
-                    _rel(path, root_folder),
-                    zenodo_url,
-                    EXTRA_INPUT_DESCRIPTIONS["pub_info"],
+                    describe(rel, EXTRA_INPUT_DESCRIPTIONS[label]),
                     package=zenodo_package,
                     zip_filename=zenodo_zip_filename,
                 )
@@ -1023,6 +1020,7 @@ def analyse_sample(
                         comment = data_description(label)
                     else:
                         comment = OUTPUT_MISC_DESCRIPTIONS.get(label)
+                    comment = describe(rel, comment)
                     extras = {"rdfs:comment": comment} if comment else None
                     snippet = battinfo.add_data(
                         rel,
@@ -1032,6 +1030,11 @@ def analyse_sample(
                         zip_filename=zenodo_zip_filename,
                     )
                     battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
+            for rel in sheet_files:
+                logger.warning(
+                    "The BattINFO sheet lists %s, which is not a file in this sample, ignoring it",
+                    rel,
+                )
             metadata_path = folder / f"metadata.{fcid or sample_id}.json"
             with metadata_path.open("w", encoding="utf-8") as mf:
                 json.dump(battinfo_json, mf, indent=4, ensure_ascii=False)

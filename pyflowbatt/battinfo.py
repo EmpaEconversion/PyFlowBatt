@@ -8,7 +8,7 @@ from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import pandas as pd
 
@@ -449,6 +449,38 @@ def resolve_zenodo_url(battinfo_jsonld: dict, pub_info_url: str | None) -> str |
         )
         raise ValueError(msg)
     return sheet_url or pub_info_url
+
+
+def _sheet_file_path(node: dict) -> str | None:
+    """Root-relative path of a file node written by the BattINFO converter.
+
+    Unpublished files carry the path as dcterms:identifier, published ones in their
+    download URL, after the "#" for a file inside a zip.
+    """
+    if node.get("dcterms:identifier"):
+        return node["dcterms:identifier"]
+    file_id = node.get("@id")
+    if not file_id:
+        return None
+    for separator in ("#", "/files/"):
+        if separator in file_id:
+            return unquote(file_id.split(separator, 1)[1])
+    return unquote(file_id)
+
+
+def pop_sheet_files(battinfo_jsonld: dict) -> dict[str, str | None]:
+    """Remove file nodes from the converter output, return each path and its description."""
+    files: dict[str, str | None] = {}
+    for section in ("hasOutput", "hasInput"):
+        node = battinfo_jsonld.get(section)
+        if not isinstance(node, dict) or "dcat:distribution" not in node:
+            continue
+        distribution = node.pop("dcat:distribution")
+        for item in distribution if isinstance(distribution, list) else [distribution]:
+            path = _sheet_file_path(item) if isinstance(item, dict) else None
+            if path:
+                files[path] = item.get("rdfs:comment")
+    return files
 
 
 def make_test_object(battinfo_jsonld: dict) -> dict:

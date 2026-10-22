@@ -900,6 +900,68 @@ def test_analyse_sample_raises_on_zenodo_record_mismatch(
         )
 
 
+def test_analyse_sample_owns_file_list_and_keeps_sheet_descriptions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Sheet file rows only describe files pyflowbatt finds, the rest are dropped with a warning."""
+    from pyflowbatt import analysis as analysis_module
+
+    root = tmp_path / "project"
+    sample = root / "sample_01"
+    sample.mkdir(parents=True)
+    (sample / "metadata.xlsx").write_text("x")
+
+    def fake_convert(file: Path) -> dict:
+        jsonld = _fake_convert_with_references(file)
+        zip_url = "https://zenodo.org/records/20338409/files/project.zip"
+        jsonld["hasOutput"]["dcat:distribution"] = [
+            {"@id": f"{zip_url}#sample_01/metadata.xlsx", "rdfs:comment": "Sheet description"},
+            {"@id": f"{zip_url}#empa__fcid000001/data.parquet", "rdfs:comment": "Other cell"},
+        ]
+        return jsonld
+
+    monkeypatch.setattr(analysis_module, "convert_excel_to_jsonld", fake_convert)
+    config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
+    with caplog.at_level("WARNING", logger="pyflowbatt"):
+        analysis_module.analyse_sample(sample, save_format=None, config=config, root_folder=root)
+
+    metadata = json.loads((sample / "metadata.empa__fcid123456.json").read_text())
+    file_ids = [
+        d["@id"]
+        for section in ("hasOutput", "hasInput")
+        for d in metadata[section]["dcat:distribution"]
+        if isinstance(metadata[section]["dcat:distribution"], list)
+    ] + [
+        metadata[section]["dcat:distribution"]["@id"]
+        for section in ("hasOutput", "hasInput")
+        if isinstance(metadata[section]["dcat:distribution"], dict)
+    ]
+    assert file_ids
+    assert not any("://" in i for i in file_ids)
+    inputs = metadata["hasInput"]["dcat:distribution"]
+    xlsx = next(d for d in (inputs if isinstance(inputs, list) else [inputs]))
+    assert xlsx["@id"] == "sample_01/metadata.xlsx"
+    assert xlsx["rdfs:comment"] == "Sheet description"
+    assert "lists empa__fcid000001/data.parquet, which is not a file" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("node", "expected"),
+    [
+        ({"dcterms:identifier": "a/b.csv"}, "a/b.csv"),
+        ({"@id": "https://zenodo.org/records/1/files/data.zip#a/b%20c.csv"}, "a/b c.csv"),
+        ({"@id": "https://zenodo.org/records/1/files/a/b.csv"}, "a/b.csv"),
+    ],
+)
+def test_pop_sheet_files_recovers_paths(node: dict, expected: str) -> None:
+    """Converter file nodes give back their root-relative path and are removed."""
+    from pyflowbatt.battinfo import pop_sheet_files
+
+    jsonld = {"hasInput": {"@type": "dcat:Dataset", "dcat:distribution": node}}
+    assert pop_sheet_files(jsonld) == {expected: None}
+    assert jsonld == {"hasInput": {"@type": "dcat:Dataset"}}
+
+
 def test_analyse_sample_records_pub_info_xlsx_as_input(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
