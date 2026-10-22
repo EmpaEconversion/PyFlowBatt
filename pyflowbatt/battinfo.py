@@ -620,44 +620,31 @@ def zenodo_download_url(
     root_rel_path: str,
     zenodo_doi_url: str | None,
     *,
-    package: Literal["zip", "files"] = "files",
     zip_filename: str | None = None,
 ) -> str | None:
-    """Build the Zenodo download URL for a file, once it is uploaded to Zenodo.
+    """Build the Zenodo download URL for a file inside the zip uploaded to Zenodo.
 
     This is the resolved *location* of the file (used for "dcat:downloadURL"),
     kept separate from its "@id" (identity), which stays the bare root-relative
     path everywhere so it matches the file's "@id" in the RO-Crate manifest.
+    Zenodo has no folders, so the root folder is uploaded as one zip. Zenodo cannot
+    link into a zip, so the path within it is a fragment after "#".
 
     Args:
         root_rel_path: path to the file relative to the root folder that gets
-            uploaded to Zenodo, e.g. sample_01/results/eis_post.bdf.parquet
+            zipped, e.g. sample_01/results/eis_post.bdf.parquet
         zenodo_doi_url: Zenodo archive DOI URL, e.g. https://doi.org/10.5281/zenodo.12345678
-        package: "zip" if the whole root folder is uploaded as a single zip (Zenodo
-            has no URL that deep-links into a file inside that zip, so the fragment
-            after "#" is only useful once the zip has been downloaded and extracted),
-            or "files" if every file is uploaded individually, preserving the folder
-            structure in the file's Zenodo "key" (in which case a direct download URL
-            can be built for it).
-        zip_filename: name of the zip file as uploaded to Zenodo (required when
-            package="zip").
+        zip_filename: name of the zip file as uploaded to Zenodo
 
     Returns:
-        A Zenodo URL identifying the file's download location, or None if no
-        zenodo_doi_url is given yet.
+        A Zenodo URL identifying the file's download location, or None without
+        both a zenodo_doi_url and a zip_filename.
 
     """
-    if not zenodo_doi_url:
+    if not zenodo_doi_url or not zip_filename:
         return None
-
     record_id = zenodo_record_id(zenodo_doi_url)
     base = f"https://zenodo.org/records/{record_id}/files"
-    if package == "files":
-        return f"{base}/{quote(root_rel_path)}"
-
-    if not zip_filename:
-        msg = "zip_filename is required when package='zip'"
-        raise ValueError(msg)
     return f"{base}/{quote(zip_filename, safe='')}#{quote(root_rel_path)}"
 
 
@@ -666,7 +653,6 @@ def add_input_data(
     zenodo_doi_url: str | None,
     comment: str | None = None,
     *,
-    package: Literal["zip", "files"] = "files",
     zip_filename: str | None = None,
 ) -> dict:
     """Add links to raw input files to the hasInput section of json-ld output.
@@ -676,8 +662,7 @@ def add_input_data(
             e.g. sample_01/cell01_GCPL_01.mpr
         zenodo_doi_url: optional Zenodo archive URL
         comment: human-readable description of what this file is
-        package: see :func:`zenodo_file_id`
-        zip_filename: see :func:`zenodo_file_id`
+        zip_filename: see :func:`zenodo_download_url`
 
     Returns:
         dict with "BatteryTest" as top level type.
@@ -688,9 +673,7 @@ def add_input_data(
         "@type": "dcat:Distribution",
         "dcat:mediaType": _media_type_node(rel_file_path),
     }
-    download_url = zenodo_download_url(
-        rel_file_path, zenodo_doi_url, package=package, zip_filename=zip_filename
-    )
+    download_url = zenodo_download_url(rel_file_path, zenodo_doi_url, zip_filename=zip_filename)
     if download_url:
         dist["dcat:downloadURL"] = {"@id": download_url}
     if comment:
@@ -710,7 +693,6 @@ def add_data(
     zenodo_doi_url: str | None,
     extras: dict | None = None,
     *,
-    package: Literal["zip", "files"] = "files",
     zip_filename: str | None = None,
 ) -> dict:
     """Add links to data files to output section of json-ld output.
@@ -720,8 +702,7 @@ def add_data(
             e.g. empa__fcid01345/empa__fcid01345.bdf.parquet
         zenodo_doi_url: path to zenodo archive e.g. https://doi.org/10.1234/zenodo.12345678
         extras: dict with any extra terms to include in metadata
-        package: see :func:`zenodo_file_id`
-        zip_filename: see :func:`zenodo_file_id`
+        zip_filename: see :func:`zenodo_download_url`
 
     Returns:
         dict with "BatteryTest" as top level type.
@@ -771,9 +752,7 @@ def add_data(
         **additions,
         **extras,
     }
-    download_url = zenodo_download_url(
-        rel_file_path, zenodo_doi_url, package=package, zip_filename=zip_filename
-    )
+    download_url = zenodo_download_url(rel_file_path, zenodo_doi_url, zip_filename=zip_filename)
     if download_url:
         dist["dcat:downloadURL"] = {"@id": download_url}
 
@@ -967,9 +946,7 @@ def parse_zenodo_info_xlsx(
         dict with zenodo info. The "General" sheet's rows are lowercased and
         underscored into keys, e.g. a "Zenodo Doi Url" row becomes "zenodo_doi_url".
         An optional "Zenodo Zip Filename" row overrides the default zip filename
-        (``<root folder name>.zip``) used by :func:`zenodo_file_id` when the CLI's
-        ``--zip`` flag is used; whether "zip" or "files" packaging applies is decided
-        by that flag, not by anything in this sheet.
+        (``<root folder name>.zip``) that the CLI's ``--zip`` flag writes.
 
     """
     if isinstance(xlsx_file, Path):

@@ -753,10 +753,10 @@ def _all_download_urls(obj: object) -> set[str]:
     return found
 
 
-def test_analyse_sample_default_package_is_files_and_root_relative(
+def test_analyse_sample_without_zip_has_no_download_urls(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Default zenodo_package="files": @id stays root-relative, downloadURL is per-file."""
+    """Without a zip, @id stays root-relative and @base is set, but nothing has a downloadURL."""
     from pyflowbatt import analysis as analysis_module
 
     root = tmp_path / "project"
@@ -778,10 +778,7 @@ def test_analyse_sample_default_package_is_files_and_root_relative(
     metadata = json.loads((sample / "metadata.empa__fcid123456.json").read_text())
     ids = _all_ids(metadata)
     assert "sample_01/metadata.xlsx" in ids
-
-    urls = _all_download_urls(metadata)
-    expected = "https://zenodo.org/records/20338409/files/sample_01/metadata.xlsx"
-    assert expected in urls
+    assert _all_download_urls(metadata) == set()
 
     context = metadata["@context"]
     local_terms = next(c for c in context if isinstance(c, dict))
@@ -868,12 +865,14 @@ def test_analyse_sample_zenodo_record_from_sheet_without_pub_info(
     monkeypatch.setattr(analysis_module, "convert_excel_to_jsonld", _fake_convert_with_references)
 
     config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
-    analysis_module.analyse_sample(sample, save_format=None, config=config, root_folder=root)
+    analysis_module.analyse_sample(
+        sample, save_format=None, config=config, root_folder=root, zip_filename="project.zip"
+    )
 
     metadata = json.loads((sample / "metadata.empa__fcid123456.json").read_text())
     local_terms = next(c for c in metadata["@context"] if isinstance(c, dict))
     assert local_terms["@base"] == "https://zenodo.org/records/20338409/"
-    expected = "https://zenodo.org/records/20338409/files/sample_01/metadata.xlsx"
+    expected = "https://zenodo.org/records/20338409/files/project.zip#sample_01/metadata.xlsx"
     assert expected in _all_download_urls(metadata)
 
 
@@ -985,20 +984,21 @@ def test_analyse_sample_records_pub_info_xlsx_as_input(
         root_folder=root,
         pub_info={"zenodo_doi_url": "https://doi.org/10.5281/zenodo.20338409"},
         pub_info_path=pub_info_xlsx,
+        zip_filename="project.zip",
     )
 
     assert extra_inputs["pub_info"] == [pub_info_xlsx]
 
     metadata = json.loads((sample / "metadata.empa__fcid123456.json").read_text())
     assert "publication_info.xlsx" in _all_ids(metadata["hasInput"])
-    expected = "https://zenodo.org/records/20338409/files/publication_info.xlsx"
+    expected = "https://zenodo.org/records/20338409/files/project.zip#publication_info.xlsx"
     assert expected in _all_download_urls(metadata["hasInput"])
 
 
-def test_analyse_sample_zip_package_id_points_at_zip_with_path_fragment(
+def test_analyse_sample_zip_download_url_points_at_zip_with_path_fragment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """zenodo_package="zip": @id stays root-relative, downloadURL is the zip with a fragment."""
+    """With a zip, @id stays root-relative, downloadURL is the zip with a fragment."""
     from pyflowbatt import analysis as analysis_module
 
     root = tmp_path / "project"
@@ -1014,7 +1014,7 @@ def test_analyse_sample_zip_package_id_points_at_zip_with_path_fragment(
         save_format=None,
         config=config,
         root_folder=root,
-        zenodo_package="zip",
+        zip_filename="project.zip",
         pub_info={"zenodo_doi_url": "https://doi.org/10.5281/zenodo.20338409"},
     )
 
@@ -1031,7 +1031,7 @@ def test_analyse_sample_zip_package_id_points_at_zip_with_path_fragment(
     assert local_terms["@base"] == "https://zenodo.org/records/20338409/"
 
 
-def test_analyse_sample_zip_package_base_shared_across_zips_in_one_record(
+def test_analyse_sample_base_shared_across_zips_in_one_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Two zips in the same record share "@base": it's scoped to the record, not the zip.
@@ -1059,11 +1059,8 @@ def test_analyse_sample_zip_package_base_shared_across_zips_in_one_record(
             save_format=None,
             config=config,
             root_folder=root,
-            zenodo_package="zip",
-            pub_info={
-                "zenodo_doi_url": "https://doi.org/10.5281/zenodo.20338409",
-                "zenodo_zip_filename": zip_filename,
-            },
+            zip_filename=zip_filename,
+            pub_info={"zenodo_doi_url": "https://doi.org/10.5281/zenodo.20338409"},
         )
         metadata = json.loads((sample / "metadata.empa__fcid123456.json").read_text())
         assert "sample_01/metadata.xlsx" in _all_ids(metadata)
@@ -1073,6 +1070,27 @@ def test_analyse_sample_zip_package_base_shared_across_zips_in_one_record(
 
     assert bases[0] == bases[1] == "https://zenodo.org/records/20338409/"
     assert download_urls[0] != download_urls[1]
+
+
+@pytest.mark.parametrize("zip_output", [False, True])
+def test_analyse_all_samples_rocrate_only_inside_zip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, zip_output: bool
+) -> None:
+    """The RO-Crate is only written with a zip, and then only inside it."""
+    from pyflowbatt import analysis as analysis_module
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    root = tmp_path / "project"
+    _write_synthetic_sample(root / "sample_01")
+
+    analysis_module.analyse_all_samples(root, save_format=None, zip_output=zip_output)
+
+    assert not (root / "ro-crate-metadata.json").exists()
+    zip_path = tmp_path / "project.zip"
+    assert zip_path.exists() == zip_output
+    if zip_output:
+        with zipfile.ZipFile(zip_path) as zf:
+            assert "ro-crate-metadata.json" in zf.namelist()
 
 
 def test_analyse_sample_no_zenodo_url_keeps_bare_relative_path(
@@ -2059,7 +2077,7 @@ def test_battinfo_distribution_values_are_iris(
 
     dcat = Namespace(DCAT_NS)
     csvw = Namespace("http://www.w3.org/ns/csvw#")
-    dist = add_data(rel_path, "https://doi.org/10.5281/zenodo.12345678")
+    dist = add_data(rel_path, "https://doi.org/10.5281/zenodo.12345678", zip_filename="data.zip")
     doc = {
         "@context": {"@base": "https://example.org/", "dcat": str(dcat), "csvw": str(csvw)},
         **dist["hasOutput"]["dcat:distribution"],

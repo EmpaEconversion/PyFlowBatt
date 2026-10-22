@@ -27,6 +27,7 @@ from pyflowbatt.report import LOG_FILENAME, Reporter
 logger = logging.getLogger(__name__)
 
 SAVE_FORMATS = Literal["parquet", "csv"] | None
+ROCRATE_FILENAME = "ro-crate-metadata.json"
 DEFAULT_DEPTH = 6  # Default max search depth in folders
 DEFAULT_SEARCH = 10000  # Default max number of folders searched
 
@@ -493,7 +494,7 @@ def analyse_sample(
     save_format: SAVE_FORMATS = "parquet",
     config: PyFlowBattConfig | None = None,
     root_folder: str | Path | None = None,
-    zenodo_package: Literal["zip", "files"] = "files",
+    zip_filename: str | None = None,
     reporter: Reporter | None = None,
 ) -> tuple[dict[str, list[Path]], dict[str, list[Path]], dict[str, list[Path]], str | None, str]:
     """Read all the files in a folder, analayse and plot everything.
@@ -512,18 +513,15 @@ def analyse_sample(
     and match where the file actually sits once the root folder is packaged for Zenodo.
     Every file's "@id" is this bare root-relative path, matching its "@id" in the
     RO-Crate manifest (ro-crate-metadata.json); this deliberately never changes with
-    ``zenodo_package`` or Zenodo upload, so the two documents can be cross-referenced by
-    "@id" alone.
+    zipping or Zenodo upload, so the two documents can be cross-referenced by "@id" alone.
 
     ``pub_info_path`` is the xlsx ``pub_info`` was parsed from; when given it is recorded
     as an input alongside the protocol and BattINFO xlsx files. Dataset details from the
     BattINFO sheet take priority over ``pub_info``, which takes priority over defaults.
 
-    ``zenodo_package`` controls how the resolved "dcat:downloadURL" (a separate property
-    from "@id") points at Zenodo-hosted files, once the Zenodo record is known from the
-    BattINFO sheet's Dataset URL or ``pub_info["zenodo_doi_url"]``: "files" (default)
-    points directly at each file's own Zenodo download URL (matching an unzipped
-    upload); "zip" points at one zip's Zenodo download URL with the
+    ``zip_filename`` is the zip the root folder is packaged into for Zenodo. With it, and
+    a Zenodo record from the BattINFO sheet's Dataset URL or ``pub_info["zenodo_doi_url"]``,
+    each file gets a "dcat:downloadURL" (separate from its "@id") into that zip, with the
     in-archive path as a fragment (see :func:`pyflowbatt.battinfo.zenodo_download_url`).
 
     ``reporter`` is told when each step starts and finishes, to show progress.
@@ -979,7 +977,6 @@ def analyse_sample(
 
     if battinfo_json is not None:
         with reporter.task("Metadata"):
-            zenodo_zip_filename = pub_info.get("zenodo_zip_filename") or f"{root_folder.name}.zip"
 
             def describe(rel: str, default: str | None) -> str | None:
                 """Prefer the BattINFO sheet's description of a file over pyflowbatt's."""
@@ -992,8 +989,7 @@ def analyse_sample(
                         rel,
                         zenodo_url,
                         extras={"rdfs:comment": describe(rel, raw_description(label, path))},
-                        package=zenodo_package,
-                        zip_filename=zenodo_zip_filename,
+                        zip_filename=zip_filename,
                     )
                     battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
             input_files = [
@@ -1007,8 +1003,7 @@ def analyse_sample(
                     rel,
                     zenodo_url,
                     describe(rel, EXTRA_INPUT_DESCRIPTIONS[label]),
-                    package=zenodo_package,
-                    zip_filename=zenodo_zip_filename,
+                    zip_filename=zip_filename,
                 )
                 battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
             for label, label_paths in tracked_outputs.items():
@@ -1026,8 +1021,7 @@ def analyse_sample(
                         rel,
                         zenodo_url,
                         extras=extras,
-                        package=zenodo_package,
-                        zip_filename=zenodo_zip_filename,
+                        zip_filename=zip_filename,
                     )
                     battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
             for rel in sheet_files:
@@ -1182,17 +1176,15 @@ def analyse_all_samples(  # noqa: PLR0913
     """Take a folder and run all analysis.
 
     If ``zip_output`` is True, everything is zipped into a single zip file next to
-    ``folder`` once analysis finishes, and BattINFO "@id"s reference that zip's Zenodo
-    download URL with the in-archive path as a fragment. Otherwise (the default),
-    files are left unzipped and "@id"s reference each file's own Zenodo download URL
-    directly, for uploading every file individually.
+    ``folder`` once analysis finishes, for uploading to Zenodo. The zip holds an RO-Crate
+    manifest, and BattINFO files get download URLs into the zip. Otherwise (the default)
+    only the analysis results and BattINFO metadata are written.
 
     ``reporter`` is told when each sample and step starts and finishes, to show progress.
     """
     folder = Path(folder).resolve()
     reporter = reporter or Reporter()
     pub_info, pub_info_path = pub_info_from_root(folder)
-    zenodo_package: Literal["zip", "files"] = "zip" if zip_output else "files"
     zip_filename = pub_info.get("zenodo_zip_filename") or f"{folder.name}.zip"
     if zip_output:
         check_path_writable(folder.parent / zip_filename)
@@ -1228,7 +1220,7 @@ def analyse_all_samples(  # noqa: PLR0913
                 pub_info_path=pub_info_path,
                 config=configs_by_sample_folder[sample_folder],
                 root_folder=folder,
-                zenodo_package=zenodo_package,
+                zip_filename=zip_filename if zip_output else None,
                 reporter=reporter,
             )
 
@@ -1238,8 +1230,7 @@ def analyse_all_samples(  # noqa: PLR0913
         reporter.plan(
             [
                 *(["Combined summary"] if len(sample_folders) > 1 else []),
-                "RO-Crate",
-                *(["Zip"] if zip_output else []),
+                *(["RO-Crate", "Zip"] if zip_output else []),
             ]
         )
         if len(sample_folders) > 1:
@@ -1256,24 +1247,27 @@ def analyse_all_samples(  # noqa: PLR0913
                 workbook.close()
                 logger.debug("Combined all the results into one big summary")
 
-        with reporter.task("RO-Crate", detail="ro-crate-metadata.json"):
-            write_rocrate(
-                folder,
-                sample_folders,
-                tracked_by_sample_folder,
-                tracked_extras_by_sample_folder,
-                fcids_by_sample_folder,
-                configs_by_sample_folder,
-                sample_ids_by_sample_folder,
-                raw_inputs_by_sample_folder,
-            )
-            logger.debug("Written RO-Crate metadata to %s", folder / "ro-crate-metadata.json")
-
         if zip_output:
+            crate_path = folder / ROCRATE_FILENAME
             zip_path = folder.parent / zip_filename
-            with reporter.task("Zip", detail=str(zip_path)):
-                zip_folder(folder, zip_path)
-                logger.debug("Zipped everything into %s", zip_path)
+            try:
+                with reporter.task("RO-Crate", detail=ROCRATE_FILENAME):
+                    write_rocrate(
+                        folder,
+                        sample_folders,
+                        tracked_by_sample_folder,
+                        tracked_extras_by_sample_folder,
+                        fcids_by_sample_folder,
+                        configs_by_sample_folder,
+                        sample_ids_by_sample_folder,
+                        raw_inputs_by_sample_folder,
+                    )
+                with reporter.task("Zip", detail=str(zip_path)):
+                    zip_folder(folder, zip_path)
+                    logger.debug("Zipped everything into %s", zip_path)
+            finally:
+                # The ro-crate metadata only exists in the zip
+                crate_path.unlink(missing_ok=True)
 
     reporter.finish()
 
@@ -1332,11 +1326,16 @@ def dry_analyse_all_samples(
         )
     if zip_output:
         zip_filename = pub_info.get("zenodo_zip_filename") or f"{folder.name}.zip"
-        logger.info("Then I would zip everything and output to %s.", folder.parent / zip_filename)
+        logger.info(
+            "Then I would write an RO-Crate manifest, zip everything and output to %s.",
+            folder.parent / zip_filename,
+        )
         logger.info("BattINFO metadata would reference files via that zip's download URL.")
     else:
-        logger.info("Files would be left unzipped (pass --zip to bundle them into one zip).")
-        logger.info("BattINFO metadata would reference each file's own download URL.")
+        logger.info(
+            "Files would be left unzipped (pass --zip to package them with an RO-Crate "
+            "manifest for Zenodo)."
+        )
 
 
 def pub_info_from_root(folder: Path) -> tuple[dict, Path | None]:
