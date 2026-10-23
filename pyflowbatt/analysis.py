@@ -684,6 +684,13 @@ def analyse_sample(
                 # The cell might already be in a BatteryTest
                 battinfo_json = battinfo.make_test_object(raw_json)
                 battinfo_cell = battinfo_json["hasTestObject"]
+                if not battinfo.is_cell_type(battinfo_cell.get("@type")):
+                    logger.warning(
+                        "Cell type %r in %s doesn't look like a battery or cell class, "
+                        "the metadata will describe the tested object as that",
+                        battinfo_cell.get("@type"),
+                        _rel(file, root_folder),
+                    )
                 fcid = battinfo_cell["schema:productID"]
                 battinfo_sample_id = battinfo_cell["schema:name"]
                 # pyflowbatt lists the files it finds, the sheet only adds descriptions

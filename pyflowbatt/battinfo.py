@@ -486,18 +486,25 @@ def pop_sheet_files(battinfo_jsonld: dict) -> dict[str, str | None]:
     return files
 
 
+# Battery and cell classes in the ontology end with one of these, e.g. RedoxFlowBattery, CoinCell
+CELL_TYPE_SUFFIXES = ("Battery", "Cell")
+
+
 def make_test_object(battinfo_jsonld: dict) -> dict:
-    """Put BattINFO redox flow battery description inside a BatteryTest object."""
-    if battinfo_jsonld.get("@type") == "RedoxFlowBattery":
-        return {
-            "@context": battinfo_jsonld.pop("@context"),
-            "@type": "BatteryTest",
-            "hasTestObject": battinfo_jsonld,
-        }
+    """Put a BattINFO cell description inside a BatteryTest object, unless it is one already."""
     if battinfo_jsonld.get("@type") == "BatteryTest":
         return battinfo_jsonld
-    msg = "BattINFO JSON-LD must have RedoxFlowBattery or BatteryTest as top level @type"
-    raise ValueError(msg)
+    return {
+        "@context": battinfo_jsonld.pop("@context", {}),
+        "@type": "BatteryTest",
+        "hasTestObject": battinfo_jsonld,
+    }
+
+
+def is_cell_type(cell_type: object) -> bool:
+    """Check that a cell's @type looks like a battery or cell class, e.g. CoinCell."""
+    types = cell_type if isinstance(cell_type, list) else [cell_type]
+    return any(isinstance(t, str) and t.endswith(CELL_TYPE_SUFFIXES) for t in types)
 
 
 def add_input_and_output() -> dict:

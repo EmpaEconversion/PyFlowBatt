@@ -626,6 +626,105 @@ def test_rocrate_describes_unmatched_raw_data(
     )
 
 
+@pytest.mark.parametrize(
+    "cell_type",
+    [
+        "RedoxFlowBattery",
+        "VanadiumRedoxFlowBattery",
+        "FlowCell",
+        ["RedoxFlowBattery", "IronRedoxFlowBattery"],
+    ],
+)
+def test_make_test_object_wraps_cell_types(cell_type: str | list[str]) -> None:
+    """Cell classes, including subtypes from the v0.2.0 template, become the test object."""
+    from pyflowbatt.battinfo import make_test_object
+
+    test = make_test_object({"@context": {}, "@type": cell_type, "schema:productID": "FCID1"})
+    assert test["@type"] == "BatteryTest"
+    assert test["hasTestObject"]["@type"] == cell_type
+    assert test["hasTestObject"]["schema:productID"] == "FCID1"
+
+
+@pytest.mark.parametrize(
+    ("cell_type", "expected"),
+    [
+        ("RedoxFlowBattery", True),
+        ("VanadiumRedoxFlowBattery", True),
+        ("LithiumIonBattery", True),
+        ("FlowCell", True),
+        ("CoinCell", True),
+        (["Thing", "RedoxFlowBattery"], True),
+        ("Cheese", False),
+        ("Electrode", False),
+        (None, False),
+    ],
+)
+def test_is_cell_type(cell_type: str | list[str] | None, *, expected: bool) -> None:
+    """Battery and cell classes are recognised, anything else is not."""
+    from pyflowbatt.battinfo import is_cell_type
+
+    assert is_cell_type(cell_type) == expected
+
+
+def test_analyse_sample_accepts_cell_subtype(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A subtype like VanadiumRedoxFlowBattery is analysed like any flow cell."""
+    from pyflowbatt import analysis as analysis_module
+
+    sample = tmp_path / "sample"
+    sample.mkdir()
+    (sample / "metadata.xlsx").write_text("x")  # content is irrelevant; conversion is stubbed
+
+    def fake_convert(_file: Path) -> dict:
+        return {
+            "@context": {},
+            "@type": "VanadiumRedoxFlowBattery",
+            "schema:productID": "empa__fcid123456",
+            "schema:name": "vanadium-cell",
+        }
+
+    monkeypatch.setattr(analysis_module, "convert_excel_to_jsonld", fake_convert)
+
+    config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
+    _outputs, _extra_inputs, _raw_inputs, fcid, sample_id = analysis_module.analyse_sample(
+        sample, save_format=None, config=config
+    )
+    assert fcid == "empa__fcid123456"
+    assert sample_id == "vanadium-cell"
+    metadata = json.loads((sample / "metadata.empa__fcid123456.json").read_text())
+    assert metadata["hasTestObject"]["@type"] == "VanadiumRedoxFlowBattery"
+
+
+def test_analyse_sample_warns_about_odd_cell_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A cell type that is not a battery or cell class is warned about, naming the sheet."""
+    from pyflowbatt import analysis as analysis_module
+
+    sample = tmp_path / "sample"
+    sample.mkdir()
+    (sample / "metadata.xlsx").write_text("x")  # content is irrelevant; conversion is stubbed
+
+    def fake_convert(_file: Path) -> dict:
+        return {
+            "@context": {},
+            "@type": "Cheese",
+            "schema:productID": "FCID1",
+            "schema:name": "cheese-cell",
+        }
+
+    monkeypatch.setattr(analysis_module, "convert_excel_to_jsonld", fake_convert)
+
+    config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
+    with caplog.at_level("WARNING", logger="pyflowbatt"):
+        analysis_module.analyse_sample(sample, save_format=None, config=config)
+
+    assert "Cell type 'Cheese' in metadata.xlsx doesn't look like a battery" in caplog.text
+    metadata = json.loads((sample / "metadata.FCID1.json").read_text())
+    assert metadata["hasTestObject"]["@type"] == "Cheese"
+
+
 def test_analyse_sample_uses_battinfo_fcid_without_toml(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
