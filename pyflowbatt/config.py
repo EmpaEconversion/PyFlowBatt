@@ -147,7 +147,7 @@ _SECTION_KEYS: dict[str, set[str]] = {
     },
     "extra_patterns": set(_TECHNIQUE_KEYS),
     "eis_tags": set(),
-    "eis": {"model", "summary_params"},
+    "eis": {"model", "summary_params", "max_fit_error"},
     "cv": set(_CV_KEYS),
 }
 
@@ -307,7 +307,7 @@ class PyFlowBattConfig:
     # EIS tag -> glob patterns; unpinned files are tagged by protocol layout
     eis_tag_patterns: dict[str, list[str]] = field(default_factory=dict)
     eis_model: str = "L0-R0-(R1,CPE1)-(R2,CPE2)"  # fasteis circuit string fitted to EIS
-    eis_summary_params: list[str] = field(default_factory=lambda: ["R0.r"])
+    eis_summary_params: list[str] = field(default_factory=lambda: ["R0.r", "R1.r", "R2.r"])
     sample_name_pattern: str = r"^\d+_.+_.+$"
     sample_name: str | None = None  # overrides pattern entirely
     lsv_threshold: int = 8  # numeric cutoff for pre/post when only one LSV file is found
