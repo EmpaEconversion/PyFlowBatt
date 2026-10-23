@@ -6,7 +6,7 @@ import logging
 import re
 import uuid
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal
 from urllib.parse import unquote
 
@@ -467,13 +467,29 @@ def is_pyflowbatt_file(path: Path) -> bool:
 
 
 def find_included_files(folder: Path, patterns: list[str]) -> list[Path]:
-    """Files in folder matching any include_files glob pattern, in a stable order."""
-    found = {
-        path
-        for pattern in patterns
-        for path in folder.glob(pattern)
-        if path.is_file() and not is_pyflowbatt_file(path)
-    }
+    """Files in folder matching any include_files glob pattern, in a stable order.
+
+    Matches outside folder, e.g. from "../" in a pattern, are left out with a warning.
+    """
+    base = folder.resolve()
+    found = set()
+    for pattern in patterns:
+        try:
+            matches = list(folder.glob(pattern))
+        except (NotImplementedError, ValueError):
+            logger.warning("Ignoring include_files pattern %r: it must be relative", pattern)
+            continue
+        for path in matches:
+            resolved = path.resolve()
+            if not resolved.is_relative_to(base):
+                logger.warning(
+                    "Ignoring %s from include_files pattern %r: it is outside %s",
+                    resolved,
+                    pattern,
+                    folder,
+                )
+            elif path.is_file() and not is_pyflowbatt_file(path):
+                found.add(folder / resolved.relative_to(base))
     return sorted(found)
 
 
@@ -514,6 +530,16 @@ def resolved_settings(
     return settings
 
 
+def _escapes_root(rel: str) -> bool:
+    """Check if a zip entry name is absolute or climbs out with "..", so could extract anywhere."""
+    posix = rel.replace("\\", "/")
+    return (
+        posix.startswith("/")
+        or re.match(r"^[A-Za-z]:", posix) is not None
+        or ".." in PurePosixPath(posix).parts
+    )
+
+
 def zip_folder(
     root_folder: Path,
     zip_path: Path,
@@ -526,9 +552,15 @@ def zip_folder(
     files in both the RO-Crate manifest and BattINFO metadata, so a file's "@id"
     can be found directly inside the zip once it's extracted. Other files in
     root_folder are left out with a warning. `generated` maps archive paths to text
-    written straight into the zip, never to root_folder.
+    written straight into the zip, never to root_folder. Entries that could extract
+    outside the target folder, like "../x" or "C:/x", are never written.
     """
-    wanted = set(members)
+    generated = generated or {}
+    unsafe = sorted(rel for rel in {*members, *generated} if _escapes_root(rel))
+    if unsafe:
+        logger.warning("Not zipping %s: zip entries must stay inside the zipped folder", unsafe)
+    generated = {rel: text for rel, text in generated.items() if rel not in unsafe}
+    wanted = set(members) - set(unsafe)
     skipped = [
         rel
         for file in sorted(root_folder.rglob("*"))
@@ -546,7 +578,6 @@ def zip_folder(
             len(skipped),
             shown,
         )
-    generated = generated or {}
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for rel in sorted(wanted - set(generated)):
             zf.write(root_folder / rel, arcname=rel)

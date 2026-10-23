@@ -1535,6 +1535,59 @@ def test_resolved_toml_reproduces_settings_despite_other_home_config(tmp_path: P
     assert "area_cm2 = 3.0" in resolved
 
 
+def test_find_included_files_stays_inside_folder(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Patterns reaching outside the folder, or absolute ones, are ignored with a warning."""
+    from pyflowbatt.analysis import find_included_files
+
+    root = tmp_path / "project"
+    sample = root / "sample_01"
+    (sample / "sub").mkdir(parents=True)
+    (sample / "note.txt").write_text("x")
+    (root / "shared.txt").write_text("x")
+    (tmp_path / "outside.txt").write_text("x")
+    patterns = [
+        "sub/../note.txt",
+        "../shared.txt",
+        "../../outside.txt",
+        str(tmp_path / "outside.txt"),
+    ]
+
+    with caplog.at_level("WARNING", logger="pyflowbatt"):
+        found = find_included_files(sample, patterns)
+
+    assert found == [sample / "note.txt"]
+    messages = [r.getMessage() for r in caplog.records]
+    assert sum("is outside" in m for m in messages) == 2
+    assert sum("must be relative" in m for m in messages) == 1
+
+
+def test_zip_folder_never_writes_entries_outside_the_zip_root(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Absolute or ".." entry names are refused, whether from files or generated text."""
+    from pyflowbatt.analysis import zip_folder
+
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "ok.txt").write_text("x")
+    (tmp_path / "evil.txt").write_text("x")
+
+    zip_path = tmp_path / "out.zip"
+    with caplog.at_level("WARNING", logger="pyflowbatt"):
+        zip_folder(
+            root,
+            zip_path,
+            ["ok.txt", "../evil.txt", "C:/evil.txt", "/evil.txt"],
+            generated={"a/../../evil.toml": "x", "settings.toml": "x"},
+        )
+
+    with zipfile.ZipFile(zip_path) as zf:
+        assert sorted(zf.namelist()) == ["ok.txt", "settings.toml"]
+    assert "zip entries must stay inside the zipped folder" in caplog.text
+
+
 def test_include_files_adds_up_across_configs(tmp_path: Path) -> None:
     """include_files patterns from parent and sample configs are combined."""
     sample = tmp_path / "project" / "sample_01"
