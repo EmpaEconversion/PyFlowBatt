@@ -2416,13 +2416,14 @@ def test_eis_summary_params_toml_override(tmp_path: Path) -> None:
     sample_dir.mkdir()
     home = tmp_path / "home"
     toml = sample_dir / "pyflowbatt.toml"
-    assert PyFlowBattConfig.load(sample_dir, home=home).eis_summary_params == ["R0.r"]
+    default = ["R0.r", "R1.r", "R2.r"]
+    assert PyFlowBattConfig.load(sample_dir, home=home).eis_summary_params == default
 
     toml.write_text('[eis]\nsummary_params = ["R0.r", "R1.r"]\n')
     assert PyFlowBattConfig.load(sample_dir, home=home).eis_summary_params == ["R0.r", "R1.r"]
 
     toml.write_text('[eis]\nsummary_params = "R1.r"\n')
-    assert PyFlowBattConfig.load(sample_dir, home=home).eis_summary_params == ["R0.r"]
+    assert PyFlowBattConfig.load(sample_dir, home=home).eis_summary_params == default
 
 
 def test_eis_summary_label_pretty_units() -> None:
@@ -2546,10 +2547,9 @@ def test_analyse_sample_summary_has_eis_rows_without_eis(
     df = pd.read_excel(sample / "results" / "summary.xlsx", sheet_name="Summary", index_col=0)
     eis_rows = [q for q in df.index if q.startswith("EIS")]
     assert eis_rows == [
-        "EIS R0.r pre / Ω",
-        "EIS R0.r pre-50%SOC / Ω",
-        "EIS R0.r post-50%SOC / Ω",
-        "EIS R0.r post / Ω",
+        f"EIS {param} {tag} / Ω"
+        for param in ["R0.r", "R1.r", "R2.r"]
+        for tag in ["pre", "pre-50%SOC", "post-50%SOC", "post"]
     ]
     assert df.loc[eis_rows, "Value"].isna().all()
 
@@ -2927,7 +2927,7 @@ def test_misplaced_setting_warns_with_line(
     assert [r.getMessage() for r in caplog.records if expected.format(path=toml) in r.getMessage()]
     assert config.area_cm2 is None
     assert config.cv_v_min == 0.4004
-    assert config.eis_summary_params == ["R0.r"]
+    assert config.eis_summary_params == ["R0.r", "R1.r", "R2.r"]
     assert config.eis_tag_patterns in ({}, {"pre": ["*_02_*"]})
 
 
