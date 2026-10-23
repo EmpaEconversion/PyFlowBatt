@@ -4,6 +4,7 @@ import base64
 import io
 import json
 import logging
+import re
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +19,8 @@ from pyflowbatt.version import __title__, __url__, __version__
 logger = logging.getLogger(__name__)
 
 BDF_SCHEMA_IRI = "https://w3id.org/battery-data-alliance/ontology/battery-data-format/schema"
+# Record number in a Zenodo DOI (zenodo.123) or record page URL (/records/123, older /record/123)
+_ZENODO_RECORD_RE = re.compile(r"zenodo\.(\d+)|/records?/(\d+)")
 # DCAT expects dcat:mediaType values from the IANA register, as IRIs in this form
 IANA_MEDIA_TYPES = "http://www.iana.org/assignments/media-types/"
 
@@ -625,12 +628,20 @@ def add_fcid_output(
     }
 
 
-def zenodo_record_id(zenodo_doi_url: str) -> str:
-    """Extract the numeric Zenodo record ID from a Zenodo DOI URL.
+def zenodo_record_id(zenodo_url: str) -> str:
+    """Extract the numeric Zenodo record ID from a Zenodo DOI or record page URL.
 
-    e.g. "https://doi.org/10.5281/zenodo.20338409" -> "20338409"
+    e.g. "https://doi.org/10.5281/zenodo.20338409" or "https://zenodo.org/records/20338409"
+    -> "20338409". Raises ValueError for a URL with neither form.
     """
-    return zenodo_doi_url.rsplit(".", maxsplit=1)[-1]
+    match = _ZENODO_RECORD_RE.search(zenodo_url)
+    if match is None:
+        msg = (
+            f"Cannot find a Zenodo record number in {zenodo_url!r}, expected e.g. "
+            "https://doi.org/10.5281/zenodo.12345678 or https://zenodo.org/records/12345678"
+        )
+        raise ValueError(msg)
+    return match.group(1) or match.group(2)
 
 
 def zenodo_download_url(

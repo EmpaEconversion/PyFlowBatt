@@ -2773,6 +2773,43 @@ def test_resolve_zenodo_url(
     assert resolve_zenodo_url(sheet, pub_info_url) == expected
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://doi.org/10.5281/zenodo.21805277",
+        "https://doi.org/10.5281/zenodo.21805277/",
+        "https://zenodo.org/records/21805277",
+        "https://zenodo.org/records/21805277?preview=1",
+        "https://zenodo.org/record/21805277",
+        "https://zenodo.org/doi/10.5281/zenodo.21805277",
+    ],
+)
+def test_zenodo_record_id_from_doi_and_record_urls(url: str) -> None:
+    """DOIs and record page URLs give the same record number and @base."""
+    from pyflowbatt.battinfo import add_zenodo_url, zenodo_record_id
+
+    assert zenodo_record_id(url) == "21805277"
+    base = add_zenodo_url(url)["@context"][0]["@base"]
+    assert base == "https://zenodo.org/records/21805277/"
+
+
+def test_zenodo_record_id_rejects_other_urls() -> None:
+    """A URL without a Zenodo record number is an error naming the URL."""
+    from pyflowbatt.battinfo import zenodo_record_id
+
+    with pytest.raises(ValueError, match=re.escape("example.org/dataset/42")):
+        zenodo_record_id("https://example.org/dataset/42")
+
+
+def test_resolve_zenodo_url_same_record_in_different_forms() -> None:
+    """A record page URL in the sheet and a DOI in pub_info for one record do not conflict."""
+    from pyflowbatt.battinfo import resolve_zenodo_url
+
+    sheet = {"hasOutput": {"dcat:accessURL": {"@id": "https://zenodo.org/records/21805277"}}}
+    pub_info_url = "https://doi.org/10.5281/zenodo.21805277"
+    assert resolve_zenodo_url(sheet, pub_info_url) == "https://zenodo.org/records/21805277"
+
+
 def test_template_every_single_hash_line_uncomments_to_valid_toml(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
