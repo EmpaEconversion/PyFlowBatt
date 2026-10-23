@@ -673,6 +673,38 @@ def add_input_data(
         dict with "BatteryTest" as top level type.
 
     """
+    return {
+        "@type": "BatteryTest",
+        "hasInput": {
+            "@type": "dcat:Dataset",
+            "dcat:distribution": _file_node(rel_file_path, zenodo_doi_url, comment, zip_filename),
+        },
+    }
+
+
+def add_included_data(
+    rel_file_path: str,
+    zenodo_doi_url: str | None,
+    comment: str | None = None,
+    *,
+    zip_filename: str | None = None,
+) -> dict:
+    """Add a file listed in include_files to the hasOutput section, without inferring a type."""
+    return {
+        "@type": "BatteryTest",
+        "hasOutput": {
+            "dcat:distribution": _file_node(rel_file_path, zenodo_doi_url, comment, zip_filename),
+        },
+    }
+
+
+def _file_node(
+    rel_file_path: str,
+    zenodo_doi_url: str | None,
+    comment: str | None,
+    zip_filename: str | None,
+) -> dict:
+    """Describe one file as a dcat:Distribution."""
     dist: dict = {
         "@id": quote(rel_file_path),
         "@type": "dcat:Distribution",
@@ -683,14 +715,7 @@ def add_input_data(
         dist["dcat:downloadURL"] = {"@id": download_url}
     if comment:
         dist["rdfs:comment"] = comment
-
-    return {
-        "@type": "BatteryTest",
-        "hasInput": {
-            "@type": "dcat:Dataset",
-            "dcat:distribution": dist,
-        },
-    }
+    return dist
 
 
 def add_data(

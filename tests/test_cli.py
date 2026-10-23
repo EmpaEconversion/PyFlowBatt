@@ -127,14 +127,17 @@ def test_dry_run_writes_no_log_file(tmp_path: Path) -> None:
     assert not (tmp_path / "pyflowbatt.log").exists()
 
 
-def test_zip_skips_log_file(tmp_path: Path) -> None:
-    """The log is not included with the zip."""
+def test_zip_skips_log_file(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """The log is not included with the zip, and is left out without a warning."""
     root = tmp_path / "root"
     root.mkdir()
     (root / "data.csv").write_text("x")
     (root / "pyflowbatt.log").write_text("log")
-    with zipfile.ZipFile(zip_folder(root, tmp_path / "out.zip")) as zf:
+    with caplog.at_level("WARNING", logger="pyflowbatt"):
+        zip_path = zip_folder(root, tmp_path / "out.zip", ["data.csv"])
+    with zipfile.ZipFile(zip_path) as zf:
         assert zf.namelist() == ["data.csv"]
+    assert caplog.records == []
 
 
 @pytest.mark.parametrize("verbose", [False, True])

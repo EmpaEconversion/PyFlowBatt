@@ -11,6 +11,7 @@ from rocrate.rocrate import ROCrate
 
 from pyflowbatt.analysis import (
     EXTRA_INPUT_DESCRIPTIONS,
+    INCLUDED_LABEL,
     OTHER_RAW_LABEL,
     OUTPUT_MISC_DESCRIPTIONS,
     _custom_eis_tag,
@@ -78,6 +79,8 @@ def _output_description(label: str, path: Path) -> str | None:
     Shared with the descriptions `analyse_sample` writes into BattINFO JSON-LD,
     so a plot and its companion data file get distinct, consistent wording.
     """
+    if label == INCLUDED_LABEL:
+        return OUTPUT_MISC_DESCRIPTIONS[label]
     if path.suffix == ".png":
         return plot_description(label)
     if path.suffix in (".parquet", ".csv"):
@@ -172,6 +175,7 @@ def write_rocrate(
     sample_ids_by_sample_folder: dict[Path, str] | None = None,
     raw_inputs_by_sample_folder: dict[Path, dict[str, list[Path]]] | None = None,
     dataset_details: dict[str, object] | None = None,
+    root_included: list[Path] | None = None,
 ) -> None:
     """Write ro-crate-metadata.json at root_folder describing all inputs and outputs.
 
@@ -179,7 +183,8 @@ def write_rocrate(
     BattINFO JSON-LD describe the same files. Without it the folders are re-classified,
     which finds the same technique files but no unmatched raw data.
 
-    `dataset_details` sets root dataset properties.
+    `dataset_details` sets root dataset properties. `root_included` are files outside
+    the sample folders matched by include_files.
     """
     details = dataset_details or {}
     crate = ROCrate()
@@ -274,7 +279,9 @@ def write_rocrate(
                 extra_entities[label] = label_extra_ents
 
         for label, paths in tracked_by_sample_folder.get(sample_folder, {}).items():
-            if label == "metadata":
+            if label == INCLUDED_LABEL:
+                derived_from = None
+            elif label == "metadata":
                 derived_from = _unwrap_len_1_list(
                     [
                         ent
@@ -289,11 +296,9 @@ def write_rocrate(
             for path in paths:
                 if not path.exists():
                     continue
-                props: dict = {
-                    "name": path.name,
-                    "encodingFormat": media_type(path),
-                    "wasDerivedFrom": derived_from,
-                }
+                props: dict = {"name": path.name, "encodingFormat": media_type(path)}
+                if derived_from is not None:
+                    props["wasDerivedFrom"] = derived_from
                 desc = _output_description(label, path)
                 if desc:
                     props["description"] = desc
@@ -314,6 +319,17 @@ def write_rocrate(
                 "encodingFormat": media_type(combined_summary),
                 "wasDerivedFrom": _unwrap_len_1_list(all_sample_datasets),
                 "description": "Combined per-sample summary across all cells",
+            },
+        )
+
+    for path in root_included or []:
+        crate.add_file(
+            str(path),
+            dest_path=_rel(path, root_folder),
+            properties={
+                "name": path.name,
+                "encodingFormat": media_type(path),
+                "description": OUTPUT_MISC_DESCRIPTIONS[INCLUDED_LABEL],
             },
         )
 

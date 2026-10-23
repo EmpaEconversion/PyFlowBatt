@@ -1237,11 +1237,84 @@ def test_zip_folder_uses_root_relative_arcnames_no_wrapping_directory(tmp_path: 
     (root / "combined_summary.xlsx").write_bytes(b"fake xlsx")
 
     zip_path = tmp_path / "project.zip"
-    zip_folder(root, zip_path)
+    zip_folder(root, zip_path, ["sample_01/results/gcpl.png", "combined_summary.xlsx"])
 
     with zipfile.ZipFile(zip_path) as zf:
         names = set(zf.namelist())
     assert names == {"sample_01/results/gcpl.png", "combined_summary.xlsx"}
+
+
+def test_zip_folder_skips_undescribed_files_with_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Files not in the member list stay out of the zip and are named in a warning."""
+    from pyflowbatt.analysis import zip_folder
+
+    root = tmp_path / "project"
+    (root / "sample_01").mkdir(parents=True)
+    (root / "sample_01" / "data.csv").write_text("x")
+    (root / "sample_01" / "old.bak").write_text("x")
+
+    zip_path = tmp_path / "project.zip"
+    with caplog.at_level("WARNING", logger="pyflowbatt"):
+        zip_folder(root, zip_path, ["sample_01/data.csv"])
+
+    with zipfile.ZipFile(zip_path) as zf:
+        assert zf.namelist() == ["sample_01/data.csv"]
+    assert "Not zipping 1 file(s)" in caplog.text
+    assert "sample_01/old.bak" in caplog.text
+
+
+def test_include_files_adds_up_across_configs(tmp_path: Path) -> None:
+    """include_files patterns from parent and sample configs are combined."""
+    sample = tmp_path / "project" / "sample_01"
+    sample.mkdir(parents=True)
+    (sample.parent / "pyflowbatt.toml").write_text('include_files = ["*.txt"]\n')
+    (sample / "pyflowbatt.toml").write_text('include_files = ["photos/*.jpg", "*.txt"]\n')
+
+    config = PyFlowBattConfig.load(sample, home=tmp_path / "home")
+    assert config.include_files == ["*.txt", "photos/*.jpg"]
+
+
+def test_analyse_all_samples_zips_included_and_described_files_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """include_files are described in BattINFO and the crate and zipped, strays are skipped."""
+    from pyflowbatt import analysis as analysis_module
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr(analysis_module, "convert_excel_to_jsonld", _fake_convert)
+    root = tmp_path / "project"
+    sample = _write_synthetic_sample(root / "sample_01")
+    (sample / "metadata.xlsx").write_text("x")
+    (sample / "pyflowbatt.toml").write_text('include_files = ["photos/*.jpg"]\n')
+    (sample / "photos").mkdir()
+    (sample / "photos" / "cell.jpg").write_bytes(b"jpg")
+    (sample / "old.bak").write_text("x")
+    (root / "pyflowbatt.toml").write_text('include_files = ["README.md"]\n')
+    (root / "README.md").write_text("readme")
+
+    with caplog.at_level("WARNING", logger="pyflowbatt"):
+        analysis_module.analyse_all_samples(root, save_format=None, zip_output=True)
+
+    with zipfile.ZipFile(tmp_path / "project.zip") as zf:
+        names = set(zf.namelist())
+        crate = json.loads(zf.read("ro-crate-metadata.json"))
+    assert {"sample_01/photos/cell.jpg", "README.md"} <= names
+    assert "sample_01/old.bak" not in names
+    assert "sample_01/old.bak" in caplog.text
+
+    entities = {e["@id"]: e for e in crate["@graph"]}
+    photo = entities["sample_01/photos/cell.jpg"]
+    assert photo["description"] == "Additional file included with the dataset"
+    assert "wasDerivedFrom" not in photo
+    assert "README.md" in entities
+
+    metadata = json.loads((sample / "metadata.empa__fcid123456.json").read_text())
+    outputs = metadata["hasOutput"]["dcat:distribution"]
+    photo_node = next(d for d in outputs if d["@id"] == "sample_01/photos/cell.jpg")
+    assert photo_node["@type"] == "dcat:Distribution"
+    assert "csvw:tableSchema" not in photo_node
 
 
 def test_sample_id_custom_pattern(tmp_path: Path) -> None:

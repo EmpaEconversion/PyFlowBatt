@@ -8,6 +8,7 @@ import uuid
 import zipfile
 from pathlib import Path
 from typing import Literal
+from urllib.parse import unquote
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -123,7 +124,11 @@ OUTPUT_DATA_DESCRIPTIONS: dict[str, str] = {
 OUTPUT_MISC_DESCRIPTIONS: dict[str, str] = {
     "summary": "Per-sample analysis summary",
     "metadata": "BattINFO JSON-LD metadata",
+    "included": "Additional file included with the dataset",
 }
+
+# Label for files matched by include_files in pyflowbatt.toml
+INCLUDED_LABEL = "included"
 
 # Descriptions for extra tracked inputs (protocol file, BattINFO xlsx), keyed by label.
 EXTRA_INPUT_DESCRIPTIONS: dict[str, str] = {
@@ -451,24 +456,61 @@ def check_path_writable(path: Path) -> None:
         probe.unlink()
 
 
-def zip_folder(root_folder: Path, zip_path: Path) -> Path:
-    """Zip every file in root_folder into zip_path, with no wrapping top-level directory.
+def find_included_files(folder: Path, patterns: list[str]) -> list[Path]:
+    """Files in folder matching any include_files glob pattern, in a stable order."""
+    found = {path for pattern in patterns for path in folder.glob(pattern) if path.is_file()}
+    return sorted(found)
+
+
+def _silently_skipped(file: Path) -> bool:
+    """Check for hidden EC-lab files, Excel lock files and the PyFlowBatt log."""
+    return (
+        file.suffix in {".mgr", ".sta", ".mpp", ".mgp"}
+        or file.name.startswith("~$")
+        or file.name == LOG_FILENAME
+    )
+
+
+def crate_file_paths(crate_path: Path) -> list[str]:
+    """Root-relative paths of the files an RO-Crate manifest describes."""
+    crate = json.loads(crate_path.read_text(encoding="utf-8"))
+    paths = []
+    for entity in crate["@graph"]:
+        types = entity["@type"] if isinstance(entity["@type"], list) else [entity["@type"]]
+        if "File" in types:
+            paths.append(unquote(entity["@id"]))
+    return paths
+
+
+def zip_folder(root_folder: Path, zip_path: Path, members: list[str]) -> Path:
+    """Zip the listed root-relative files into zip_path, with no wrapping top-level directory.
 
     Archive members are root_folder-relative paths, matching the "@id"s used for
     files in both the RO-Crate manifest and BattINFO metadata, so a file's "@id"
-    can be found directly inside the zip once it's extracted.
-
-    Ignores hidden EC-lab files, Excel lock files and the PyFlowBatt log.
+    can be found directly inside the zip once it's extracted. Other files in
+    root_folder are left out with a warning.
     """
+    wanted = set(members)
+    skipped = [
+        rel
+        for file in sorted(root_folder.rglob("*"))
+        if file.is_file()
+        and not _silently_skipped(file)
+        and (rel := _rel(file, root_folder)) not in wanted
+    ]
+    if skipped:
+        shown = ", ".join(skipped[:10]) + (
+            f" and {len(skipped) - 10} more" if len(skipped) > 10 else ""
+        )
+        logger.warning(
+            "Not zipping %d file(s) the metadata doesn't describe, "
+            "add them to include_files in pyflowbatt.toml to package them: %s",
+            len(skipped),
+            shown,
+        )
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for file in sorted(root_folder.rglob("*")):
-            if (
-                file.is_file()
-                and file.suffix not in {".mgr", ".sta", ".mpp", ".mgp"}
-                and not file.name.startswith("~$")
-                and file.name != LOG_FILENAME
-            ):
-                zf.write(file, arcname=_rel(file, root_folder))
+        for rel in sorted(wanted):
+            zf.write(root_folder / rel, arcname=rel)
     return zip_path
 
 
@@ -975,6 +1017,20 @@ def analyse_sample(
     if pub_info_path and pub_info_path != battinfo_xlsx_path:
         tracked_extra_inputs["pub_info"] = [pub_info_path]
 
+    already_tracked = {
+        path
+        for group in (raw_inputs, tracked_extra_inputs, tracked_outputs)
+        for paths in group.values()
+        for path in paths
+    }
+    included = [
+        path
+        for path in find_included_files(folder, config.include_files)
+        if path not in already_tracked
+    ]
+    if included:
+        tracked_outputs[INCLUDED_LABEL] = included
+
     if battinfo_json is not None:
         with reporter.task("Metadata"):
 
@@ -1009,6 +1065,15 @@ def analyse_sample(
             for label, label_paths in tracked_outputs.items():
                 for path in label_paths:
                     rel = _rel(path, root_folder)
+                    if label == INCLUDED_LABEL:
+                        snippet = battinfo.add_included_data(
+                            rel,
+                            zenodo_url,
+                            describe(rel, OUTPUT_MISC_DESCRIPTIONS[label]),
+                            zip_filename=zip_filename,
+                        )
+                        battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
+                        continue
                     if path.suffix == ".png":
                         comment = plot_description(label)
                     elif rel.endswith((".parquet", ".csv")):
@@ -1257,6 +1322,14 @@ def analyse_all_samples(  # noqa: PLR0913
                         for tracked in tracked_by_sample_folder.values()
                         for path in tracked.get("metadata", [])
                     ]
+                    root_included = [
+                        path
+                        for path in find_included_files(folder, search_config.include_files)
+                        if not any(
+                            path in tracked.get(INCLUDED_LABEL, [])
+                            for tracked in tracked_by_sample_folder.values()
+                        )
+                    ]
                     write_rocrate(
                         folder,
                         sample_folders,
@@ -1267,9 +1340,10 @@ def analyse_all_samples(  # noqa: PLR0913
                         sample_ids_by_sample_folder,
                         raw_inputs_by_sample_folder,
                         dataset_details=agreed_dataset_details(battinfo_docs),
+                        root_included=root_included,
                     )
                 with reporter.task("Zip", detail=str(zip_path)):
-                    zip_folder(folder, zip_path)
+                    zip_folder(folder, zip_path, [*crate_file_paths(crate_path), ROCRATE_FILENAME])
                     logger.debug("Zipped everything into %s", zip_path)
             finally:
                 # The ro-crate metadata only exists in the zip

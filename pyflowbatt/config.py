@@ -137,6 +137,7 @@ _SECTION_KEYS: dict[str, set[str]] = {
         "area_cm2",
         "assembled_resistance_ohm",
         "summary_n_cycles",
+        "include_files",
     },
     "extra_patterns": set(_TECHNIQUE_KEYS),
     "eis_tags": set(),
@@ -229,6 +230,7 @@ class PyFlowBattConfig:
         area_cm2 = 3.14   # electrode area used to normalise LSV resistance
         assembled_resistance_ohm = 25000   # external resistor value used in the cell assembly
         summary_n_cycles = [10, 20, 30, 40, 50]  # cycle counts reported in the summary sheet
+        include_files = ["notes.txt", "photos/*.jpg"]  # extra files packaged with --zip
 
         [extra_patterns]
         eis  = ["*_EIS_*"]    # adds to the built-in *_PEIS_*
@@ -286,6 +288,8 @@ class PyFlowBattConfig:
     cv_min_r2: float = 0.8  # fit-quality gate below which CV capacitance isn't reported
     # cycle counts reported in the summary sheet (N cycles avg. CE/EE/VE/capacity)
     summary_n_cycles: list[int] = field(default_factory=lambda: [10, 20, 30, 40, 50])
+    # glob patterns for extra files described in the metadata and packaged with --zip
+    include_files: list[str] = field(default_factory=list)
 
     @classmethod
     def load(cls, folder: str | Path, *, home: Path | None = None) -> PyFlowBattConfig:
@@ -386,7 +390,7 @@ class PyFlowBattConfig:
                     "Ignoring bad eis.summary_params in %s (expected list of strings)", path
                 )
 
-        for key in ("extensions", "extra_extensions"):
+        for key in ("extensions", "extra_extensions", "include_files"):
             if key in data:
                 values = data[key]
                 if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
@@ -395,9 +399,10 @@ class PyFlowBattConfig:
                 if key == "extensions":
                     self.extensions = list(values)
                 else:
+                    current = self.include_files if key == "include_files" else self.extensions
                     for v in values:
-                        if v not in self.extensions:
-                            self.extensions.append(v)
+                        if v not in current:
+                            current.append(v)
 
         if "lsv_threshold" in data:
             if isinstance(data["lsv_threshold"], int):
@@ -484,6 +489,11 @@ TEMPLATE_TOML = """\
 
 ## --- Cycle counts reported in the summary sheet ---
 # summary_n_cycles = [10, 20, 30, 40, 50]
+
+## --- Extra files to package with --zip ---
+## Glob patterns, matched in each sample folder this file applies to.
+## Otherwise only files used in analysis get zipped
+# include_files = ["notes.txt", "photos/*.jpg"]
 
 ## --- Extra filename glob patterns per technique (added to the built-in patterns below) ---
 # [extra_patterns]
