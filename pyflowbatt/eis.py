@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "L0-R0-(R1,CPE1)-(R2,CPE2)"
 MODELS_URL = "https://empaeconversion.github.io/fasteis/models/"
+MAX_FIT_ERROR = 0.1
 
 # fasteis unit strings -> units for summary row labels
 PRETTY_UNITS: dict[str, str] = {
@@ -99,18 +100,33 @@ def check_model(model: str, summary_params: list[str]) -> tuple[dict[str, str], 
     return units, True
 
 
+def _impedance(df: pd.DataFrame) -> np.ndarray:
+    """Measured complex impedance in ohm."""
+    return (df["Real Impedance / ohm"] + 1j * df["Imaginary Impedance / ohm"]).to_numpy()
+
+
+def fit_error(df: pd.DataFrame, Z_fit: np.ndarray) -> float:
+    """RMS distance between fit and data relative to |Z|, e.g. 0.05 is 5% off on average."""
+    Z = _impedance(df)
+    return float(np.sqrt(np.mean(np.abs((Z_fit - Z) / np.abs(Z)) ** 2)))
+
+
 def analyse(
     df: pd.DataFrame,
     label: str = "",
     model: str = DEFAULT_MODEL,
     *,
     guess_init: bool | None = None,
-) -> tuple[dict[str, dict], np.ndarray]:
-    """Fit EIS to an equivalent circuit model, warning if the fit looks unreliable."""
+    max_fit_error: float = MAX_FIT_ERROR,
+) -> tuple[dict[str, dict] | None, np.ndarray]:
+    """Fit EIS to an equivalent circuit model, warning if the fit looks unreliable.
+
+    Parameters are None if the fit error is above max_fit_error.
+    """
     import fasteis  # noqa: PLC0415
 
     f = df["Frequency / Hz"]
-    Z = df["Real Impedance / ohm"] + 1j * df["Imaginary Impedance / ohm"]
+    Z = _impedance(df)
     circuit = fasteis.Circuit(model)
     res = circuit.fit(f, Z, guess_init=guess_init)
     Z_fit = res.circuit.impedance(f)
@@ -123,23 +139,44 @@ def analyse(
         logger.warning("- EIS fit %s did not converge", label)
     if all(p["err"] is None for p in params.values()):
         logger.warning("- EIS fit %s has no standard errors, parameters are degenerate", label)
+    error = fit_error(df, Z_fit)
+    if error > max_fit_error:
+        logger.warning(
+            "- EIS fit %s error is very high (%.3f>%s), not reporting parameters",
+            label,
+            error,
+            max_fit_error,
+        )
+        return None, Z_fit
     return params, Z_fit
 
 
-def plot(df: pd.DataFrame, Z_fit: np.ndarray) -> tuple[Figure, Axes]:
+def plot(
+    df: pd.DataFrame, Z_fit: np.ndarray, max_fit_error: float = MAX_FIT_ERROR
+) -> tuple[Figure, Axes]:
     """Nyquist plot fit result."""
-    Z = df["Real Impedance / ohm"] + 1j * df["Imaginary Impedance / ohm"]
+    Z = _impedance(df)
+    error = fit_error(df, Z_fit)
+    bad = error > max_fit_error
     fig, ax = plt.subplots()
     # Residual segments from each data point to its fitted point
     data_pts = np.column_stack([np.real(Z), -np.imag(Z)])
     fit_pts = np.column_stack([np.real(Z_fit), -np.imag(Z_fit)])
     segments = list(zip(data_pts, fit_pts, strict=True))
     ax.plot(np.real(Z), -np.imag(Z), "k.-", label="Data")
-    ax.plot(np.real(Z_fit), -np.imag(Z_fit), "C0.-", label="Fit")
+    ax.plot(
+        np.real(Z_fit),
+        -np.imag(Z_fit),
+        "C0.--" if bad else "C0.-",
+        label="Fit (bad)" if bad else "Fit",
+    )
     ax.add_collection(
         LineCollection(segments, colors="grey", linewidths=0.8, label="Residual", zorder=1)
     )
-    ax.legend()
+    error_text = f"Fit error = {error:.3f}"
+    if bad:
+        error_text += f"\n(>{max_fit_error}, result ignored)"
+    ax.legend(title=error_text)
     ax.set_xlabel("Real Impedance / ohm")
     ax.set_ylabel("Imaginary Impedance / ohm")
     fig.tight_layout()

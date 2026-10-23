@@ -914,12 +914,17 @@ def analyse_sample(
             try:
                 df = read_to_bdf(f)
                 params, Z_fit = eis.analyse(
-                    df, label=f.stem, model=config.eis_model, guess_init=has_ml_guess
+                    df,
+                    label=f.stem,
+                    model=config.eis_model,
+                    guess_init=has_ml_guess,
+                    max_fit_error=config.eis_max_fit_error,
                 )
-                fig, _ax = eis.plot(df, Z_fit)
+                fig, _ax = eis.plot(df, Z_fit, max_fit_error=config.eis_max_fit_error)
                 fig.savefig(results_dir / f"eis_{tag}.png")
                 plt.close(fig)
-                eis_res[tag] = params
+                if params is not None:
+                    eis_res[tag] = params
                 df["Real Impedance Fit / ohm"] = np.real(Z_fit)
                 df["Imaginary Impedance Fit / ohm"] = np.imag(Z_fit)
                 df_save_bdf(df, results_dir / f"eis_{tag}.x", save_format=save_format)
@@ -929,7 +934,7 @@ def analyse_sample(
                         (results_dir / f"eis_{tag}.x").with_suffix(bdf_suffix)
                     )
                 tracked_mpr_inputs[f"eis_{tag}"] = [Path(eis_file)]
-                for name, values in params.items():
+                for name, values in (params or {}).items():
                     rows.append({"file": f.stem, "tag": tag, "name": name, **values})
             except Exception as e:
                 logger.error("Failed to fit %s: %s", f.stem, str(e))  # noqa: TRY400

@@ -277,6 +277,7 @@ class PyFlowBattConfig:
         [eis]
         model = "L0-R0-(R1,CPE1)-(R2,CPE2)"  # any fasteis circuit string
         summary_params = ["R0.r", "R1.r"]    # fit parameters reported in the summary
+        max_fit_error = 0.1  # fit-quality gate above which parameters aren't reported
 
         [cv]
         v_min = 0.4     # voltage window used to plot
@@ -308,6 +309,7 @@ class PyFlowBattConfig:
     eis_tag_patterns: dict[str, list[str]] = field(default_factory=dict)
     eis_model: str = "L0-R0-(R1,CPE1)-(R2,CPE2)"  # fasteis circuit string fitted to EIS
     eis_summary_params: list[str] = field(default_factory=lambda: ["R0.r", "R1.r", "R2.r"])
+    eis_max_fit_error: float = 0.1  # RMS fit error relative to |Z| above which EIS isn't reported
     sample_name_pattern: str = r"^\d+_.+_.+$"
     sample_name: str | None = None  # overrides pattern entirely
     lsv_threshold: int = 8  # numeric cutoff for pre/post when only one LSV file is found
@@ -409,11 +411,19 @@ class PyFlowBattConfig:
                 for toml_key, attr in _TECHNIQUE_KEYS.items()
             },
             "eis_tags": dict(self.eis_tag_patterns),
-            "eis": {"model": self.eis_model, "summary_params": self.eis_summary_params},
+            "eis": {
+                "model": self.eis_model,
+                "summary_params": self.eis_summary_params,
+                "max_fit_error": self.eis_max_fit_error,
+            },
             "cv": {toml_key: getattr(self, attr) for toml_key, attr in _CV_KEYS.items()},
         }
         section_defaults: dict[str, dict[str, object]] = {
-            "eis": {"model": defaults.eis_model, "summary_params": defaults.eis_summary_params},
+            "eis": {
+                "model": defaults.eis_model,
+                "summary_params": defaults.eis_summary_params,
+                "max_fit_error": defaults.eis_max_fit_error,
+            },
             "cv": {toml_key: getattr(defaults, attr) for toml_key, attr in _CV_KEYS.items()},
         }
         for name, table in sections.items():
@@ -481,6 +491,11 @@ class PyFlowBattConfig:
                 logger.warning(
                     "Ignoring bad eis.summary_params in %s (expected list of strings)", path
                 )
+        if "max_fit_error" in eis:
+            if _is_number(eis["max_fit_error"]):
+                self.eis_max_fit_error = float(eis["max_fit_error"])
+            else:
+                logger.warning("Ignoring bad eis.max_fit_error in %s (expected number)", path)
 
         for key in ("extensions", "extra_extensions", "include_files"):
             if key in data:
@@ -619,9 +634,12 @@ TEMPLATE_TOML = """\
 ## See https://empaeconversion.github.io/fasteis/models/
 ## summary_params lists the fit parameters reported in the summary for each EIS tag,
 ## named as in the EIS sheet, e.g. ["R0.r", "R1.r", "CPE1.alpha"].
+## max_fit_error is the RMS distance between fit and data relative to |Z|, e.g. 0.1 is
+## 10% off on average. Fits worse than this are plotted but not reported.
 # [eis]
 # model = "L0-R0-(R1,CPE1)-(R2,CPE2)"
-# summary_params = ["R0.r"]
+# summary_params = ["R0.r", "R1.r", "R2.r"]
+# max_fit_error = 0.1
 
 ## --- CV analysis parameters ---
 # [cv]

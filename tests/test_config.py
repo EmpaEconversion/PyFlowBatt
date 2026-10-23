@@ -1,6 +1,7 @@
 """Tests for pyflowbatt.toml configuration and technique file classification."""
 
 import json
+import logging
 import re
 import zipfile
 from pathlib import Path
@@ -2460,7 +2461,7 @@ def test_analyse_sample_summary_reports_every_eis_tag(
         }
         return params, np.array([1 + 1j])
 
-    def fake_plot(_df: object, _z_fit: np.ndarray) -> tuple:
+    def fake_plot(_df: object, _z_fit: np.ndarray, **_kwargs: object) -> tuple:
         import matplotlib.pyplot as plt
 
         return plt.subplots()
@@ -2496,6 +2497,108 @@ def test_analyse_sample_summary_reports_every_eis_tag(
     assert df.loc["EIS R0.r pre-20%SOC / Ω", "Value"] == 3.0
     assert df.loc["EIS R0.r post / Ω", "Value"] == 2.0
     assert np.isnan(df.loc["EIS R0.r pre-50%SOC / Ω", "Value"])
+
+
+def test_analyse_sample_leaves_out_rejected_eis_fit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fit rejected for its fit error is left out of the summary and EIS sheet but plotted."""
+    import numpy as np
+    import pandas as pd
+
+    from pyflowbatt import analysis as analysis_module
+
+    sample = _write_two_eis_sample(tmp_path / "sample")
+    (sample / "pyflowbatt.toml").write_text("[eis]\nmax_fit_error = 0.05\n")
+    max_errors = []
+
+    def fake_analyse(
+        _df: object, label: str, max_fit_error: float, **_kwargs: object
+    ) -> tuple[dict | None, np.ndarray]:
+        max_errors.append(max_fit_error)
+        if label == "s_06_PEIS_A":
+            return None, np.array([1 + 1j])
+        return {"R0.r": {"value": 1.0, "err": 0.1, "unit": "ohm"}}, np.array([1 + 1j])
+
+    def fake_plot(_df: object, _z_fit: np.ndarray, max_fit_error: float) -> tuple:
+        import matplotlib.pyplot as plt
+
+        max_errors.append(max_fit_error)
+        return plt.subplots()
+
+    monkeypatch.setattr(analysis_module, "read_to_bdf", lambda _f: pd.DataFrame({"x": [0]}))
+    monkeypatch.setattr(analysis_module, "df_save_bdf", lambda *_a, **_k: None)
+    monkeypatch.setattr(analysis_module.eis, "analyse", fake_analyse)
+    monkeypatch.setattr(analysis_module.eis, "plot", fake_plot)
+    monkeypatch.setattr(analysis_module.eis, "check_model", lambda *_a: ({"R0.r": "ohm"}, True))
+
+    config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
+    analysis_module.analyse_sample(sample, save_format=None, config=config)
+
+    assert max_errors == [0.05] * 4
+    assert (sample / "results" / "eis_post.png").exists()
+    xlsx = sample / "results" / "summary.xlsx"
+    summary = pd.read_excel(xlsx, sheet_name="Summary", index_col=0)
+    assert summary.loc["EIS R0.r pre / Ω", "Value"] == 1.0
+    assert np.isnan(summary.loc["EIS R0.r post / Ω", "Value"])
+    assert list(pd.read_excel(xlsx, sheet_name="EIS")["tag"]) == ["pre"]
+
+
+def test_eis_fit_error_relative_to_modulus() -> None:
+    """Fit error is the RMS of |Z_fit - Z| / |Z|, so it doesn't scale with point count."""
+    import numpy as np
+    import pandas as pd
+
+    from pyflowbatt import eis
+
+    for n in (10, 100):
+        Z = np.full(n, 3 + 4j)
+        df = pd.DataFrame({"Real Impedance / ohm": Z.real, "Imaginary Impedance / ohm": Z.imag})
+        assert eis.fit_error(df, Z) == 0
+        assert eis.fit_error(df, Z + 0.5j) == pytest.approx(0.1)
+
+
+def test_eis_analyse_rejects_bad_fit(caplog: pytest.LogCaptureFixture) -> None:
+    """A fit with error above max_fit_error warns and returns no parameters."""
+    import fasteis
+    import numpy as np
+    import pandas as pd
+
+    from pyflowbatt import eis
+
+    f = np.logspace(5, -1, 40)
+    Z = fasteis.Circuit("R0-(R1,C1)").with_values([1.0, 10.0, 1e-2]).impedance(f)
+    df = pd.DataFrame(
+        {"Frequency / Hz": f, "Real Impedance / ohm": Z.real, "Imaginary Impedance / ohm": Z.imag}
+    )
+    params, Z_fit = eis.analyse(df, model="R0-(R1,C1)", guess_init=False)
+    assert params is not None
+    assert eis.fit_error(df, Z_fit) < 1e-3
+
+    with caplog.at_level(logging.WARNING):
+        params, Z_fit = eis.analyse(df, label="flat", model="R0", guess_init=False)
+    assert params is None
+    assert len(Z_fit) == len(f)
+    assert "EIS fit flat error is very high" in caplog.text
+
+
+def test_eis_max_fit_error_toml_override(tmp_path: Path) -> None:
+    """[eis] max_fit_error overrides the default, and a non-number is ignored."""
+    from pyflowbatt import eis
+
+    sample_dir = tmp_path / "sample"
+    sample_dir.mkdir()
+    home = tmp_path / "home"
+    toml = sample_dir / "pyflowbatt.toml"
+    assert PyFlowBattConfig.load(sample_dir, home=home).eis_max_fit_error == eis.MAX_FIT_ERROR
+
+    toml.write_text("[eis]\nmax_fit_error = 0.3\n")
+    config = PyFlowBattConfig.load(sample_dir, home=home)
+    assert config.eis_max_fit_error == 0.3
+    assert "max_fit_error = 0.3" in config.to_resolved_toml()
+
+    toml.write_text('[eis]\nmax_fit_error = "low"\n')
+    assert PyFlowBattConfig.load(sample_dir, home=home).eis_max_fit_error == eis.MAX_FIT_ERROR
 
 
 def test_custom_eis_tag_descriptions() -> None:
