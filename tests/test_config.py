@@ -10,6 +10,7 @@ import pytest
 from pyflowbatt import config as config_module
 from pyflowbatt.config import PyFlowBattConfig, classify_technique_files
 from pyflowbatt.rocrate_output import _classify_inputs
+from pyflowbatt.version import __version__
 
 # Synthetic filename scheme mirroring real EC-Lab exports: <prefix>_<num>_<TECHNIQUE>_<tail>.<ext>
 # Sizes are included as the largest GCPL is used as cycling.
@@ -1265,6 +1266,65 @@ def test_zip_folder_skips_undescribed_files_with_warning(
     assert "sample_01/old.bak" in caplog.text
 
 
+def test_inherit_false_skips_home_and_parent_and_warns_once(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A config with inherit = false is used alone, with one warning about the home config."""
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "pyflowbatt.toml").write_text("area_cm2 = 9\nextra_extensions = ['.mgr']\n")
+    project = tmp_path / "project"
+    (project / "pyflowbatt.toml").parent.mkdir()
+    (project / "pyflowbatt.toml").write_text("assembled_resistance_ohm = 1000\n")
+    samples = [project / "sample_01", project / "sample_02"]
+    for sample in samples:
+        sample.mkdir()
+        (sample / "pyflowbatt.toml").write_text("inherit = false\nlsv_threshold = 3\n")
+
+    with caplog.at_level("WARNING", logger="pyflowbatt"):
+        configs = [PyFlowBattConfig.load(sample, home=home) for sample in samples]
+
+    for config in configs:
+        assert config == PyFlowBattConfig(lsv_threshold=3)
+    messages = [r.getMessage() for r in caplog.records]
+    assert len(messages) == 1
+    assert str(home / "pyflowbatt.toml") in messages[0]
+
+
+def test_resolved_toml_reproduces_settings_despite_other_home_config(tmp_path: Path) -> None:
+    """A resolved pyflowbatt.toml loads back to the same settings, whatever the home config."""
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "pyflowbatt.toml").write_text(
+        'extra_extensions = [".mgr"]\narea_cm2 = 3\n\n[extra_patterns]\ngcpl = ["*_GCD_*"]\n'
+    )
+    sample = tmp_path / "project" / "sample_01"
+    sample.mkdir(parents=True)
+    (sample.parent / "pyflowbatt.toml").write_text(
+        'include_files = ["*.txt"]\nsummary_n_cycles = [5, 10]\n\n[eis]\nmodel = "R0-(R1,CPE1)"\n'
+    )
+    (sample / "pyflowbatt.toml").write_text(
+        'sample_name = "cell \\"A\\""\nlsv_threshold = 4\n\n'
+        '[eis_tags]\n"pre-20%SOC" = ["*_03_PEIS_*"]\n\n[cv]\nv_max = 0.65\n'
+    )
+    original = PyFlowBattConfig.load(sample, home=home)
+    resolved = original.to_resolved_toml()
+
+    unpacked = tmp_path / "unpacked" / "sample_01"
+    unpacked.mkdir(parents=True)
+    (unpacked / "pyflowbatt.toml").write_text(resolved, encoding="utf-8")
+    other_home = tmp_path / "other_home"
+    other_home.mkdir()
+    (other_home / "pyflowbatt.toml").write_text(
+        'assembled_resistance_ohm = 5\nextra_extensions = [".mpt"]\n\n[eis_tags]\n"post" = ["*"]\n'
+    )
+
+    assert PyFlowBattConfig.load(unpacked, home=other_home) == original
+    assert resolved.startswith(f"## Settings PyFlowBatt {__version__} used here")
+    assert "inherit = false" in resolved
+    assert "area_cm2 = 3.0" in resolved
+
+
 def test_include_files_adds_up_across_configs(tmp_path: Path) -> None:
     """include_files patterns from parent and sample configs are combined."""
     sample = tmp_path / "project" / "sample_01"
@@ -1315,6 +1375,48 @@ def test_analyse_all_samples_zips_included_and_described_files_only(
     photo_node = next(d for d in outputs if d["@id"] == "sample_01/photos/cell.jpg")
     assert photo_node["@type"] == "dcat:Distribution"
     assert "csvw:tableSchema" not in photo_node
+
+
+def test_analyse_all_samples_zips_resolved_settings_without_touching_originals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The zip holds resolved pyflowbatt.toml files that reproduce each folder's settings."""
+    from pyflowbatt import analysis as analysis_module
+
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "pyflowbatt.toml").write_text("area_cm2 = 3\n")
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setattr(analysis_module, "convert_excel_to_jsonld", _fake_convert)
+    root = tmp_path / "project"
+    sample = _write_synthetic_sample(root / "group" / "sample_01")
+    (sample / "metadata.xlsx").write_text("x")
+    sample_toml = "lsv_threshold = 4\n"
+    (sample / "pyflowbatt.toml").write_text(sample_toml)
+    (root / "group" / "pyflowbatt.toml").write_text("assembled_resistance_ohm = 1000\n")
+    original = analysis_module.PyFlowBattConfig.load(sample)
+
+    with caplog.at_level("WARNING", logger="pyflowbatt"):
+        analysis_module.analyse_all_samples(root, save_format=None, zip_output=True)
+
+    assert (sample / "pyflowbatt.toml").read_text() == sample_toml
+    assert "pyflowbatt.toml" not in caplog.text
+    with zipfile.ZipFile(tmp_path / "project.zip") as zf:
+        names = set(zf.namelist())
+        crate = json.loads(zf.read("ro-crate-metadata.json"))
+        zf.extractall(tmp_path / "unpacked")
+    assert {"group/sample_01/pyflowbatt.toml", "pyflowbatt.toml"} <= names
+    assert "group/pyflowbatt.toml" not in names
+    entities = {e["@id"]: e for e in crate["@graph"]}
+    assert "pyflowbatt.toml" in entities["group/sample_01/pyflowbatt.toml"]["description"]
+    metadata = json.loads((sample / "metadata.empa__fcid123456.json").read_text())
+    assert "group/sample_01/pyflowbatt.toml" in _all_ids(metadata["hasInput"])
+
+    other_home = tmp_path / "other_home"
+    other_home.mkdir()
+    (other_home / "pyflowbatt.toml").write_text("lsv_threshold = 12\n")
+    unpacked_sample = tmp_path / "unpacked" / "group" / "sample_01"
+    assert analysis_module.PyFlowBattConfig.load(unpacked_sample, home=other_home) == original
 
 
 def test_sample_id_custom_pattern(tmp_path: Path) -> None:

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import warnings
 from datetime import datetime
 from pathlib import Path
 
@@ -22,7 +24,7 @@ from pyflowbatt.analysis import (
     plot_description,
     raw_description,
 )
-from pyflowbatt.config import PyFlowBattConfig, classify_technique_files
+from pyflowbatt.config import CONFIG_FILENAME, PyFlowBattConfig, classify_technique_files
 from pyflowbatt.media_types import media_type
 from pyflowbatt.version import __title__, __url__, __version__
 
@@ -176,6 +178,7 @@ def write_rocrate(
     raw_inputs_by_sample_folder: dict[Path, dict[str, list[Path]]] | None = None,
     dataset_details: dict[str, object] | None = None,
     root_included: list[Path] | None = None,
+    settings_files: list[str] | None = None,
 ) -> None:
     """Write ro-crate-metadata.json at root_folder describing all inputs and outputs.
 
@@ -183,10 +186,23 @@ def write_rocrate(
     BattINFO JSON-LD describe the same files. Without it the folders are re-classified,
     which finds the same technique files but no unmatched raw data.
 
-    `dataset_details` sets root dataset properties. `root_included` are files outside
-    the sample folders matched by include_files.
+    `dataset_details` sets root dataset properties, by default the ones the samples'
+    BattINFO metadata agree on. `root_included` are files outside the sample folders
+    matched by include_files. `settings_files` are root-relative paths of resolved
+    pyflowbatt.toml files that only exist in the zip, so they are described but never
+    written to root_folder.
     """
-    details = dataset_details or {}
+    if dataset_details is None:
+        dataset_details = agreed_dataset_details(
+            [
+                json.loads(path.read_text(encoding="utf-8"))
+                for tracked in tracked_by_sample_folder.values()
+                for path in tracked.get("metadata", [])
+                if path.exists()
+            ]
+        )
+    details = dataset_details
+    pending_settings = set(settings_files or [])
     crate = ROCrate()
     crate.root_dataset["name"] = details.get("name", root_folder.name)
     crate.root_dataset["description"] = details.get(
@@ -307,6 +323,11 @@ def write_rocrate(
                 )
                 sample_file_entities.append(output_ent)
 
+        settings_rel = _rel(sample_folder / CONFIG_FILENAME, root_folder)
+        if settings_rel in pending_settings:
+            pending_settings.discard(settings_rel)
+            sample_file_entities.append(_add_settings_file(crate, settings_rel))
+
         sample_dataset["hasPart"] = sample_file_entities  # type: ignore[index]
 
     combined_summary = root_folder / "combined_summary.xlsx"
@@ -333,4 +354,23 @@ def write_rocrate(
             },
         )
 
-    crate.write(str(root_folder))
+    for settings_rel in sorted(pending_settings):
+        _add_settings_file(crate, settings_rel)
+
+    with warnings.catch_warnings():
+        # Settings files have no source on disk, they are written into the zip instead
+        warnings.filterwarnings("ignore", message="No source for", category=UserWarning)
+        crate.write(str(root_folder))
+
+
+def _add_settings_file(crate: ROCrate, rel: str) -> object:
+    """Describe a resolved pyflowbatt.toml without a source, so the crate never writes it."""
+    return crate.add_file(
+        None,
+        dest_path=rel,
+        properties={
+            "name": CONFIG_FILENAME,
+            "encodingFormat": media_type(Path(rel)),
+            "description": EXTRA_INPUT_DESCRIPTIONS["settings"],
+        },
+    )

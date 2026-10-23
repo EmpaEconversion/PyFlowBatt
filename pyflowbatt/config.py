@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import difflib
+import functools
+import json
 import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from pyflowbatt.version import __version__
 
 try:
     import tomllib
@@ -30,6 +34,7 @@ _EIS_TAG_RE = re.compile(r"^[A-Za-z0-9%.+-]+$")  # tags become part of output fi
 # ------------ Warning/error messages for reading in settings files ---------- #
 
 _TOML_ERROR_LINE_RE = re.compile(r"at line (\d+)")
+_TOML_BARE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _TOML_TABLE_RE = re.compile(r"^\s*\[\s*([^\]]+?)\s*\]")
 _TOML_KEY_RE = re.compile(r"""^\s*["']?([^"'=\s]+)["']?\s*=""")
 
@@ -138,6 +143,7 @@ _SECTION_KEYS: dict[str, set[str]] = {
         "assembled_resistance_ohm",
         "summary_n_cycles",
         "include_files",
+        "inherit",
     },
     "extra_patterns": set(_TECHNIQUE_KEYS),
     "eis_tags": set(),
@@ -210,6 +216,33 @@ def _warn_misplaced_settings(data: dict, text: str, path: Path) -> None:
             lineno = _key_line(text, section, key)
             location = f"{path}, line {lineno}" if lineno else str(path)
             logger.warning("Ignoring %s %s (%s): %s", key, where, location, hint)
+
+
+@functools.cache
+def _warn_home_ignored(home_config: Path) -> None:
+    """Warn once per run that settings are skipping the home config."""
+    logger.warning(
+        "Not using %s where a pyflowbatt.toml sets inherit = false, "
+        "e.g. in a folder unpacked from a PyFlowBatt zip",
+        home_config,
+    )
+
+
+def _toml_key(key: str) -> str:
+    """Format a key as TOML, quoted only when it is not a bare key like v_max."""
+    return key if _TOML_BARE_KEY_RE.match(key) else json.dumps(key)
+
+
+def _toml_value(value: object) -> str:
+    """Format a setting value as TOML."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    if isinstance(value, list):
+        return "[" + ", ".join(_toml_value(v) for v in value) + "]"
+    # JSON string escapes are valid in TOML basic strings
+    return json.dumps(value)
 
 
 @dataclass
@@ -295,7 +328,9 @@ class PyFlowBattConfig:
     def load(cls, folder: str | Path, *, home: Path | None = None) -> PyFlowBattConfig:
         """Load config from ~/pyflowbatt.toml, the parent folder, and the sample folder.
 
-        Returns a config with only built-in defaults when no config file exists.
+        A file setting ``inherit = false`` is complete on its own, so the files below it
+        in priority are skipped. Returns a config with only built-in defaults when no
+        config file exists.
         """
         folder = Path(folder).resolve()
         home = home if home is not None else Path.home()
@@ -308,11 +343,17 @@ class PyFlowBattConfig:
             folder.parent / CONFIG_FILENAME,
             folder / CONFIG_FILENAME,
         ]
+        parsed = [(path, *_read_toml(path)) for path in candidates if path.is_file()]
+        for i in range(len(parsed) - 1, 0, -1):
+            if parsed[i][1].get("inherit") is False:
+                if any(path == candidates[0] for path, _, _ in parsed[:i]):
+                    _warn_home_ignored(candidates[0])
+                parsed = parsed[i:]
+                break
 
-        for path in candidates:
-            if path.is_file():
-                logger.debug("Loading PyFlowBatt config from %s", path)
-                config._apply_toml(path)
+        for path, data, text in parsed:
+            logger.debug("Loading PyFlowBatt config from %s", path)
+            config._apply_toml(path, data, text)
 
         return config
 
@@ -336,10 +377,61 @@ class PyFlowBattConfig:
                         result.append(full)
         return result
 
-    def _apply_toml(self, path: Path) -> None:
-        """Merge a single TOML config file into this config (mutates in place)."""
-        data, text = _read_toml(path)
+    def to_resolved_toml(self) -> str:
+        """Write these settings as a pyflowbatt.toml that needs no other config file.
+
+        Only settings that differ from the defaults are written, and inherit = false
+        stops home and parent configs filling in the rest when it is loaded.
+        """
+        defaults = PyFlowBattConfig()
+        lines = [
+            f"## Settings PyFlowBatt {__version__} used here, combining all pyflowbatt.toml files.",
+            "## inherit = false: no other pyflowbatt.toml is combined with this one.",
+            "inherit = false",
+        ]
+        for key in (
+            "sample_name",
+            "sample_name_pattern",
+            "extensions",
+            "lsv_threshold",
+            "area_cm2",
+            "assembled_resistance_ohm",
+            "summary_n_cycles",
+            "include_files",
+        ):
+            value = getattr(self, key)
+            if value is not None and value != getattr(defaults, key):
+                lines.append(f"{key} = {_toml_value(value)}")
+
+        sections: dict[str, dict[str, object]] = {
+            "extra_patterns": {
+                toml_key: [p for p in getattr(self, attr) if p not in getattr(defaults, attr)]
+                for toml_key, attr in _TECHNIQUE_KEYS.items()
+            },
+            "eis_tags": dict(self.eis_tag_patterns),
+            "eis": {"model": self.eis_model, "summary_params": self.eis_summary_params},
+            "cv": {toml_key: getattr(self, attr) for toml_key, attr in _CV_KEYS.items()},
+        }
+        section_defaults: dict[str, dict[str, object]] = {
+            "eis": {"model": defaults.eis_model, "summary_params": defaults.eis_summary_params},
+            "cv": {toml_key: getattr(defaults, attr) for toml_key, attr in _CV_KEYS.items()},
+        }
+        for name, table in sections.items():
+            changed = {
+                key: value
+                for key, value in table.items()
+                if value != [] and value != section_defaults.get(name, {}).get(key)
+            }
+            if changed:
+                lines += ["", f"[{name}]"]
+                lines += [f"{_toml_key(key)} = {_toml_value(v)}" for key, v in changed.items()]
+        return "\n".join(lines) + "\n"
+
+    def _apply_toml(self, path: Path, data: dict, text: str) -> None:
+        """Merge a single parsed TOML config file into this config (mutates in place)."""
         _warn_misplaced_settings(data, text, path)
+        if "inherit" in data and not isinstance(data["inherit"], bool):
+            logger.warning("Ignoring bad inherit in %s (expected true or false)", path)
 
         extra = _section(data, "extra_patterns")
         for toml_key, attr in _TECHNIQUE_KEYS.items():
@@ -469,6 +561,8 @@ TEMPLATE_TOML = """\
 ## The parent folder: applies to every sample folder inside
 ## The sample folder itself: only applies to that sample
 ## On conflicts, sample takes priority, then parent, then home.
+## You can stop this behaviour and only use this file by setting inherit to false
+# inherit = false
 
 ## --- Sample name (default: reads from battinfo, otherwise uses folder name) ---
 # sample_name = "daves-new-sample-01"      # hard-code an explicit sample name

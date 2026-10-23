@@ -17,6 +17,7 @@ from battinfoconverter_backend import convert_excel_to_jsonld
 
 from pyflowbatt import battinfo, cv, eis, gcpl, lsv, ocv
 from pyflowbatt.config import (
+    CONFIG_FILENAME,
     DEFAULT_AREA_CM2,
     EIS_TAGS,
     PyFlowBattConfig,
@@ -135,6 +136,7 @@ EXTRA_INPUT_DESCRIPTIONS: dict[str, str] = {
     "protocol": "EC-Lab measurement protocol (.mps)",
     "battinfo_xlsx": "BattINFO converter Excel metadata input",
     "pub_info": "Publication and Zenodo deposition Excel metadata input",
+    "settings": "PyFlowBatt settings used here, combining all pyflowbatt.toml files",
 }
 
 # Label for raw data files in a sample folder that no technique pattern matched.
@@ -463,11 +465,14 @@ def find_included_files(folder: Path, patterns: list[str]) -> list[Path]:
 
 
 def _silently_skipped(file: Path) -> bool:
-    """Check for hidden EC-lab files, Excel lock files and the PyFlowBatt log."""
+    """Check for hidden EC-lab files, Excel lock files, the PyFlowBatt log and config files.
+
+    The zip holds resolved pyflowbatt.toml files in place of the originals.
+    """
     return (
         file.suffix in {".mgr", ".sta", ".mpp", ".mgp"}
         or file.name.startswith("~$")
-        or file.name == LOG_FILENAME
+        or file.name in {LOG_FILENAME, CONFIG_FILENAME}
     )
 
 
@@ -482,13 +487,33 @@ def crate_file_paths(crate_path: Path) -> list[str]:
     return paths
 
 
-def zip_folder(root_folder: Path, zip_path: Path, members: list[str]) -> Path:
+def resolved_settings(
+    root_folder: Path,
+    configs_by_sample_folder: dict[Path, PyFlowBattConfig],
+    root_config: PyFlowBattConfig,
+) -> dict[str, str]:
+    """Write resolved pyflowbatt.toml text for the root and each sample folder, by path."""
+    settings = {
+        _rel(sample_folder / CONFIG_FILENAME, root_folder): config.to_resolved_toml()
+        for sample_folder, config in configs_by_sample_folder.items()
+    }
+    settings.setdefault(CONFIG_FILENAME, root_config.to_resolved_toml())
+    return settings
+
+
+def zip_folder(
+    root_folder: Path,
+    zip_path: Path,
+    members: list[str],
+    generated: dict[str, str] | None = None,
+) -> Path:
     """Zip the listed root-relative files into zip_path, with no wrapping top-level directory.
 
     Archive members are root_folder-relative paths, matching the "@id"s used for
     files in both the RO-Crate manifest and BattINFO metadata, so a file's "@id"
     can be found directly inside the zip once it's extracted. Other files in
-    root_folder are left out with a warning.
+    root_folder are left out with a warning. `generated` maps archive paths to text
+    written straight into the zip, never to root_folder.
     """
     wanted = set(members)
     skipped = [
@@ -508,9 +533,12 @@ def zip_folder(root_folder: Path, zip_path: Path, members: list[str]) -> Path:
             len(skipped),
             shown,
         )
+    generated = generated or {}
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for rel in sorted(wanted):
+        for rel in sorted(wanted - set(generated)):
             zf.write(root_folder / rel, arcname=rel)
+        for rel, text in sorted(generated.items()):
+            zf.writestr(rel, text)
     return zip_path
 
 
@@ -1052,6 +1080,8 @@ def analyse_sample(
                 *((path, "protocol") for path in mps_files),
                 *((path, "battinfo_xlsx") for path in [battinfo_xlsx_path] if path),
                 *((path, "pub_info") for path in tracked_extra_inputs.get("pub_info", [])),
+                # Only exists in the zip, written from the resolved settings
+                *([(folder / CONFIG_FILENAME, "settings")] if zip_filename else []),
             ]
             for path, label in input_files:
                 rel = _rel(path, root_folder)
@@ -1289,7 +1319,7 @@ def analyse_all_samples(  # noqa: PLR0913
                 reporter=reporter,
             )
 
-    from pyflowbatt.rocrate_output import agreed_dataset_details, write_rocrate  # noqa: PLC0415
+    from pyflowbatt.rocrate_output import write_rocrate  # noqa: PLC0415
 
     with reporter.section("Finishing"):
         reporter.plan(
@@ -1315,13 +1345,9 @@ def analyse_all_samples(  # noqa: PLR0913
         if zip_output:
             crate_path = folder / ROCRATE_FILENAME
             zip_path = folder.parent / zip_filename
+            settings = resolved_settings(folder, configs_by_sample_folder, search_config)
             try:
                 with reporter.task("RO-Crate", detail=ROCRATE_FILENAME):
-                    battinfo_docs = [
-                        json.loads(path.read_text(encoding="utf-8"))
-                        for tracked in tracked_by_sample_folder.values()
-                        for path in tracked.get("metadata", [])
-                    ]
                     root_included = [
                         path
                         for path in find_included_files(folder, search_config.include_files)
@@ -1339,11 +1365,16 @@ def analyse_all_samples(  # noqa: PLR0913
                         configs_by_sample_folder,
                         sample_ids_by_sample_folder,
                         raw_inputs_by_sample_folder,
-                        dataset_details=agreed_dataset_details(battinfo_docs),
                         root_included=root_included,
+                        settings_files=list(settings),
                     )
                 with reporter.task("Zip", detail=str(zip_path)):
-                    zip_folder(folder, zip_path, [*crate_file_paths(crate_path), ROCRATE_FILENAME])
+                    zip_folder(
+                        folder,
+                        zip_path,
+                        [*crate_file_paths(crate_path), ROCRATE_FILENAME],
+                        generated=settings,
+                    )
                     logger.debug("Zipped everything into %s", zip_path)
             finally:
                 # The ro-crate metadata only exists in the zip
