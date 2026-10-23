@@ -1046,7 +1046,79 @@ def test_analyse_sample_owns_file_list_and_keeps_sheet_descriptions(
     assert xlsx["@id"] == "sample_01/metadata.xlsx"
     assert xlsx["rdfs:comment"] == "Sheet description"
     assert metadata["hasInput"]["@type"] == "dcat:Dataset"
-    assert "lists empa__fcid000001/data.parquet, which is not a file" in caplog.text
+    assert "lists empa__fcid000001/data.parquet, which is missing" in caplog.text
+
+
+def test_analyse_all_samples_collects_requested_files_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Default, include_files and BattINFO-requested files are each described and zipped once."""
+    from pyflowbatt import analysis as analysis_module
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    root = tmp_path / "project"
+    sample = _write_synthetic_sample(root / "sample_01")
+    other = _write_synthetic_sample(root / "sample_02")
+    (sample / "metadata.xlsx").write_text("x")
+    (other / "metadata.xlsx").write_text("x")
+    for name in ("notes.pdf", "setup.txt", "photo.png"):
+        (sample / name).write_text("x")
+    (other / "other_notes.pdf").write_text("x")
+    # Extensions that also match PyFlowBatt's own files, and an overlapping include pattern
+    (sample / "pyflowbatt.toml").write_text(
+        'extra_extensions = [".png", ".xlsx", ".json", ".toml"]\ninclude_files = ["*.pdf"]\n'
+    )
+
+    def fake_convert(file: Path) -> dict:
+        jsonld = _fake_convert_with_references(file)
+        if file.parent.name == "sample_01":
+            jsonld["hasOutput"]["dcat:distribution"] = [
+                {"dcterms:identifier": "sample_01/notes.pdf", "rdfs:comment": "Lab notes"},
+                {"dcterms:identifier": "sample_02/other_notes.pdf"},
+                {"dcterms:identifier": "sample_01/missing.csv"},
+            ]
+            jsonld["hasInput"] = {
+                "@type": "dcat:Dataset",
+                "dcat:distribution": {
+                    "dcterms:identifier": "sample_01/setup.txt",
+                    "rdfs:comment": "Rig setup",
+                },
+            }
+        else:
+            jsonld["hasTestObject"]["schema:productID"] = "empa__fcid000002"
+        return jsonld
+
+    monkeypatch.setattr(analysis_module, "convert_excel_to_jsonld", fake_convert)
+    for _ in range(2):  # the second run also sees the first run's metadata files
+        caplog.clear()
+        with caplog.at_level("WARNING", logger="pyflowbatt"):
+            analysis_module.analyse_all_samples(root, save_format=None, zip_output=True)
+
+    metadata = json.loads((sample / "metadata.empa__fcid123456.json").read_text())
+    nodes: dict[str, list[tuple[str, dict]]] = {}
+    for section in ("hasInput", "hasOutput"):
+        dist = metadata[section]["dcat:distribution"]
+        for node in dist if isinstance(dist, list) else [dist]:
+            nodes.setdefault(node["@id"], []).append((section, node))
+    assert all(len(found) == 1 for found in nodes.values())
+    assert nodes["sample_01/notes.pdf"][0][0] == "hasOutput"
+    assert nodes["sample_01/notes.pdf"][0][1]["rdfs:comment"] == "Lab notes"
+    assert nodes["sample_01/setup.txt"][0][0] == "hasInput"
+    assert nodes["sample_01/setup.txt"][0][1]["rdfs:comment"] == "Rig setup"
+    assert nodes["sample_01/metadata.xlsx"][0][0] == "hasInput"
+    assert nodes["sample_01/pyflowbatt.toml"][0][0] == "hasInput"
+    assert not any(node_id.endswith(".json") for node_id in nodes)
+    assert "sample_02/other_notes.pdf" not in nodes
+
+    assert "lists sample_02/other_notes.pdf, which is outside this sample folder" in caplog.text
+    assert "lists sample_01/missing.csv, which is missing" in caplog.text
+    # Only sample_02's own sheet or config could ask for its file
+    assert "Not zipping 1 file(s)" in caplog.text
+    assert "package them: sample_02/other_notes.pdf" in caplog.text
+    with zipfile.ZipFile(tmp_path / "project.zip") as zf:
+        names = zf.namelist()
+    assert {"sample_01/notes.pdf", "sample_01/setup.txt", "sample_01/photo.png"} <= set(names)
+    assert len(names) == len(set(names))
 
 
 def test_analyse_sample_lists_protocol_once_as_input(
@@ -1098,10 +1170,10 @@ def test_analyse_sample_lists_protocol_once_as_input(
 )
 def test_pop_sheet_files_recovers_paths(node: dict, expected: str) -> None:
     """Converter file nodes give back their root-relative path and are removed."""
-    from pyflowbatt.battinfo import pop_sheet_files
+    from pyflowbatt.battinfo import SheetFile, pop_sheet_files
 
     jsonld = {"hasInput": {"@type": "dcat:Dataset", "dcat:distribution": node}}
-    assert pop_sheet_files(jsonld) == {expected: None}
+    assert pop_sheet_files(jsonld) == {expected: SheetFile("hasInput", None)}
     assert jsonld == {}
 
 

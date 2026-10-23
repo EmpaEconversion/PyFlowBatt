@@ -7,7 +7,7 @@ import logging
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Literal, NamedTuple
 from urllib.parse import quote, unquote
 
 import pandas as pd
@@ -468,9 +468,16 @@ def _sheet_file_path(node: dict) -> str | None:
     return unquote(file_id)
 
 
-def pop_sheet_files(battinfo_jsonld: dict) -> dict[str, str | None]:
-    """Remove file nodes from the converter output, return each path and its description."""
-    files: dict[str, str | None] = {}
+class SheetFile(NamedTuple):
+    """A file listed in the BattINFO sheet: its section (hasInput/hasOutput) and description."""
+
+    section: str
+    comment: str | None
+
+
+def pop_sheet_files(battinfo_jsonld: dict) -> dict[str, SheetFile]:
+    """Remove file nodes from the converter output, return each path's section and description."""
+    files: dict[str, SheetFile] = {}
     for section in ("hasOutput", "hasInput"):
         node = battinfo_jsonld.get(section)
         if not isinstance(node, dict) or "dcat:distribution" not in node:
@@ -479,7 +486,7 @@ def pop_sheet_files(battinfo_jsonld: dict) -> dict[str, str | None]:
         for item in distribution if isinstance(distribution, list) else [distribution]:
             path = _sheet_file_path(item) if isinstance(item, dict) else None
             if path:
-                files[path] = item.get("rdfs:comment")
+                files[path] = SheetFile(section, item.get("rdfs:comment"))
         # A section that only described files would leave its @type on pyflowbatt's files
         if set(node) <= {"@type"}:
             del battinfo_jsonld[section]

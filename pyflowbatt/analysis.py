@@ -458,9 +458,22 @@ def check_path_writable(path: Path) -> None:
         probe.unlink()
 
 
+def is_pyflowbatt_file(path: Path) -> bool:
+    """Check for files PyFlowBatt writes or reads as settings, which it always adds itself."""
+    name = path.name
+    return name in {CONFIG_FILENAME, LOG_FILENAME, "combined_summary.xlsx"} or (
+        name.startswith("metadata.") and name.endswith(".json")
+    )
+
+
 def find_included_files(folder: Path, patterns: list[str]) -> list[Path]:
     """Files in folder matching any include_files glob pattern, in a stable order."""
-    found = {path for pattern in patterns for path in folder.glob(pattern) if path.is_file()}
+    found = {
+        path
+        for pattern in patterns
+        for path in folder.glob(pattern)
+        if path.is_file() and not is_pyflowbatt_file(path)
+    }
     return sorted(found)
 
 
@@ -1034,11 +1047,13 @@ def analyse_sample(
     # metadata describes the data that ships rather than only what could be analysed.
     raw_inputs: dict[str, list[Path]] = {label: list(paths) for label, paths in classified.items()}
     classified_files = {path for paths in classified.values() for path in paths}
+    # Protocols, the BattINFO sheet and PyFlowBatt's own files are added in their own role
+    own_inputs = {*mps_files, *([battinfo_xlsx_path] if battinfo_xlsx_path else [])}
     other_raw = [
         path
         for ext in config.extensions
         for path in sorted(folder.glob(f"*{ext}"))
-        if path not in classified_files and path not in mps_files  # protocols are inputs
+        if path not in classified_files and path not in own_inputs and not is_pyflowbatt_file(path)
     ]
     if other_raw:
         logger.info("- Found %d raw data file(s) not matching any technique", len(other_raw))
@@ -1058,11 +1073,17 @@ def analyse_sample(
         for paths in group.values()
         for path in paths
     }
-    included = [
-        path
-        for path in find_included_files(folder, config.include_files)
-        if path not in already_tracked
-    ]
+    # Files the BattINFO sheet asks for are included like include_files, if in this sample
+    sheet_requested = {
+        root_folder / rel
+        for rel in sheet_files
+        if (root_folder / rel).is_file()
+        and (root_folder / rel).resolve().is_relative_to(folder.resolve())
+        and not is_pyflowbatt_file(root_folder / rel)
+    }
+    included = sorted(
+        {*find_included_files(folder, config.include_files), *sheet_requested} - already_tracked
+    )
     if included:
         tracked_outputs[INCLUDED_LABEL] = included
 
@@ -1071,7 +1092,8 @@ def analyse_sample(
 
             def describe(rel: str, default: str | None) -> str | None:
                 """Prefer the BattINFO sheet's description of a file over pyflowbatt's."""
-                return sheet_files.pop(rel, None) or default
+                sheet_file = sheet_files.pop(rel, None)
+                return (sheet_file.comment if sheet_file else None) or default
 
             for label, paths in raw_inputs.items():
                 for path in paths:
@@ -1103,7 +1125,11 @@ def analyse_sample(
                 for path in label_paths:
                     rel = _rel(path, root_folder)
                     if label == INCLUDED_LABEL:
-                        snippet = battinfo.add_included_data(
+                        # Input file rows in the BattINFO sheet stay inputs
+                        sheet_file = sheet_files.get(rel)
+                        is_input = sheet_file is not None and sheet_file.section == "hasInput"
+                        add = battinfo.add_input_data if is_input else battinfo.add_included_data
+                        snippet = add(
                             rel,
                             zenodo_url,
                             describe(rel, OUTPUT_MISC_DESCRIPTIONS[label]),
@@ -1127,10 +1153,8 @@ def analyse_sample(
                     )
                     battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
             for rel in sheet_files:
-                logger.warning(
-                    "The BattINFO sheet lists %s, which is not a file in this sample, ignoring it",
-                    rel,
-                )
+                where = "outside this sample folder" if (root_folder / rel).is_file() else "missing"
+                logger.warning("The BattINFO sheet lists %s, which is %s, ignoring it", rel, where)
             metadata_path = folder / f"metadata.{fcid or sample_id}.json"
             with metadata_path.open("w", encoding="utf-8") as mf:
                 json.dump(battinfo_json, mf, indent=4, ensure_ascii=False)
@@ -1359,8 +1383,14 @@ def analyse_all_samples(  # noqa: PLR0913
                         path
                         for path in find_included_files(folder, search_config.include_files)
                         if not any(
-                            path in tracked.get(INCLUDED_LABEL, [])
-                            for tracked in tracked_by_sample_folder.values()
+                            path in paths
+                            for by_sample in (
+                                tracked_by_sample_folder,
+                                tracked_extras_by_sample_folder,
+                                raw_inputs_by_sample_folder,
+                            )
+                            for tracked in by_sample.values()
+                            for paths in tracked.values()
                         )
                     ]
                     write_rocrate(
