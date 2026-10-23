@@ -1224,7 +1224,7 @@ def analyse_all_samples(  # noqa: PLR0913
                 reporter=reporter,
             )
 
-    from pyflowbatt.rocrate_output import write_rocrate  # noqa: PLC0415
+    from pyflowbatt.rocrate_output import agreed_dataset_details, write_rocrate  # noqa: PLC0415
 
     with reporter.section("Finishing"):
         reporter.plan(
@@ -1252,6 +1252,11 @@ def analyse_all_samples(  # noqa: PLR0913
             zip_path = folder.parent / zip_filename
             try:
                 with reporter.task("RO-Crate", detail=ROCRATE_FILENAME):
+                    battinfo_docs = [
+                        json.loads(path.read_text(encoding="utf-8"))
+                        for tracked in tracked_by_sample_folder.values()
+                        for path in tracked.get("metadata", [])
+                    ]
                     write_rocrate(
                         folder,
                         sample_folders,
@@ -1261,6 +1266,7 @@ def analyse_all_samples(  # noqa: PLR0913
                         configs_by_sample_folder,
                         sample_ids_by_sample_folder,
                         raw_inputs_by_sample_folder,
+                        dataset_details=agreed_dataset_details(battinfo_docs),
                     )
                 with reporter.task("Zip", detail=str(zip_path)):
                     zip_folder(folder, zip_path)

@@ -1098,6 +1098,113 @@ def test_analyse_all_samples_rocrate_only_inside_zip(
             assert "ro-crate-metadata.json" in zf.namelist()
 
 
+def test_agreed_dataset_details_keeps_agreement_and_warns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Terms all samples agree on are mapped, conflicting ones are left out with a warning."""
+    from pyflowbatt.rocrate_output import agreed_dataset_details
+
+    docs = [
+        {
+            "hasOutput": {
+                "dcterms:title": "Title",
+                "dcterms:license": {"@id": "https://creativecommons.org/licenses/by/4.0/"},
+                "schema:datePublished": "2026-08-05",
+                "dcat:accessURL": {"@id": SHEET_ZENODO_URL},
+            }
+        },
+        {
+            "hasOutput": {
+                "dcterms:title": "Title",
+                "dcterms:license": {"@id": "https://creativecommons.org/publicdomain/zero/1.0/"},
+                "schema:datePublished": "2026-08-05",
+            }
+        },
+    ]
+    with caplog.at_level("WARNING", logger="pyflowbatt"):
+        details = agreed_dataset_details(docs)
+
+    assert details == {
+        "name": "Title",
+        "datePublished": "2026-08-05",
+        "identifier": SHEET_ZENODO_URL,
+    }
+    messages = [r.getMessage() for r in caplog.records]
+    assert len(messages) == 1
+    assert "disagree on dcterms:license" in messages[0]
+
+
+def test_write_rocrate_root_from_dataset_details(tmp_path: Path) -> None:
+    """Dataset details replace the crate's own root name, description, license and dates."""
+    from pyflowbatt.rocrate_output import write_rocrate
+
+    cc0 = "https://creativecommons.org/publicdomain/zero/1.0/"
+    write_rocrate(
+        tmp_path,
+        [],
+        {},
+        dataset_details={
+            "name": "Title",
+            "description": "Description",
+            "license": cc0,
+            "datePublished": "2026-08-05",
+            "identifier": SHEET_ZENODO_URL,
+        },
+    )
+
+    crate = json.loads((tmp_path / "ro-crate-metadata.json").read_text(encoding="utf-8"))
+    entities = {e["@id"]: e for e in crate["@graph"]}
+    root = entities["./"]
+    assert root["name"] == "Title"
+    assert root["description"] == "Description"
+    assert root["license"] == {"@id": cc0}
+    assert entities[cc0]["@type"] == "CreativeWork"
+    assert root["datePublished"] == "2026-08-05"
+    assert root["identifier"] == SHEET_ZENODO_URL
+
+
+def test_write_rocrate_root_defaults_without_dataset_details(tmp_path: Path) -> None:
+    """Without dataset details the root keeps the folder name and CC BY 4.0."""
+    from pyflowbatt.rocrate_output import LICENSE_URL, write_rocrate
+
+    write_rocrate(tmp_path, [], {})
+
+    crate = json.loads((tmp_path / "ro-crate-metadata.json").read_text(encoding="utf-8"))
+    entities = {e["@id"]: e for e in crate["@graph"]}
+    root = entities["./"]
+    assert root["name"] == tmp_path.name
+    assert root["license"] == {"@id": LICENSE_URL}
+    assert entities[LICENSE_URL]["name"] == "CC BY 4.0"
+    assert "identifier" not in root
+
+
+def test_analyse_all_samples_rocrate_root_from_battinfo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The zipped RO-Crate root takes its name and identifier from the samples' BattINFO."""
+    from pyflowbatt import analysis as analysis_module
+
+    def fake_convert(file: Path) -> dict:
+        jsonld = _fake_convert_with_references(file)
+        jsonld["hasOutput"]["dcterms:title"] = "Dataset title"
+        return jsonld
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr(analysis_module, "convert_excel_to_jsonld", fake_convert)
+    root = tmp_path / "project"
+    for name in ("sample_01", "sample_02"):
+        sample = _write_synthetic_sample(root / name)
+        (sample / "metadata.xlsx").write_text("x")
+
+    analysis_module.analyse_all_samples(root, save_format=None, zip_output=True)
+
+    with zipfile.ZipFile(tmp_path / "project.zip") as zf:
+        crate = json.loads(zf.read("ro-crate-metadata.json"))
+    crate_root = next(e for e in crate["@graph"] if e["@id"] == "./")
+    assert crate_root["name"] == "Dataset title"
+    assert crate_root["identifier"] == SHEET_ZENODO_URL
+
+
 def test_analyse_sample_no_zenodo_url_keeps_bare_relative_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

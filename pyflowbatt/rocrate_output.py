@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from pathlib import Path
 
@@ -23,6 +24,8 @@ from pyflowbatt.analysis import (
 from pyflowbatt.config import PyFlowBattConfig, classify_technique_files
 from pyflowbatt.media_types import media_type
 from pyflowbatt.version import __title__, __url__, __version__
+
+logger = logging.getLogger(__name__)
 
 MEASUREMENT_LABELS: dict[str, str] = {
     "gcpl": "Galvanostatic Cycling with Potential Limitation",
@@ -51,6 +54,15 @@ def _measurement_technique(label: str) -> str:
 
 
 LICENSE_URL = "https://creativecommons.org/licenses/by/4.0/"
+
+# BattINFO dataset terms: RO-Crate root dataset property
+DATASET_TERMS = {
+    "dcterms:title": "name",
+    "dcterms:description": "description",
+    "dcterms:license": "license",
+    "schema:datePublished": "datePublished",
+    "dcat:accessURL": "identifier",
+}
 
 
 def _unwrap_len_1_list(entities: list) -> object | None:
@@ -87,20 +99,43 @@ def _classify_inputs(
     return classify_technique_files(sample_folder, config)
 
 
-def _add_license(crate: ROCrate) -> None:
+def _add_license(crate: ROCrate, license_url: str = LICENSE_URL) -> None:
     """Describe the crate licence as a contextual entity, not just a bare URL."""
-    license_entity = crate.add(
-        ContextEntity(
-            crate,
-            identifier=LICENSE_URL,
-            properties={
-                "@type": "CreativeWork",
-                "name": "CC BY 4.0",
-                "description": "Creative Commons Attribution 4.0 International License",
-            },
-        )
-    )
+    properties = {"@type": "CreativeWork"}
+    if license_url == LICENSE_URL:
+        properties["name"] = "CC BY 4.0"
+        properties["description"] = "Creative Commons Attribution 4.0 International License"
+    license_entity = crate.add(ContextEntity(crate, identifier=license_url, properties=properties))
     crate.root_dataset["license"] = license_entity
+
+
+def _iri(value: object) -> object:
+    """Return the IRI of a JSON-LD node reference, or the value itself."""
+    return value["@id"] if isinstance(value, dict) and "@id" in value else value
+
+
+def agreed_dataset_details(battinfo_docs: list[dict]) -> dict[str, object]:
+    """Root dataset properties that every sample's BattINFO metadata agrees on.
+
+    A term the samples disagree on is left out with a warning, so the crate keeps its own.
+    """
+    details: dict[str, object] = {}
+    for term, prop in DATASET_TERMS.items():
+        values: list[object] = []
+        for doc in battinfo_docs:
+            output = doc.get("hasOutput")
+            value = _iri(output.get(term)) if isinstance(output, dict) else None
+            if value is not None and value not in values:
+                values.append(value)
+        if len(values) == 1:
+            details[prop] = values[0]
+        elif values:
+            logger.warning(
+                "Samples' BattINFO metadata disagree on %s, the RO-Crate uses its own value: %s",
+                term,
+                values,
+            )
+    return details
 
 
 def _add_software_provenance(crate: ROCrate) -> None:
@@ -136,19 +171,27 @@ def write_rocrate(
     configs_by_sample_folder: dict[Path, PyFlowBattConfig] | None = None,
     sample_ids_by_sample_folder: dict[Path, str] | None = None,
     raw_inputs_by_sample_folder: dict[Path, dict[str, list[Path]]] | None = None,
+    dataset_details: dict[str, object] | None = None,
 ) -> None:
     """Write ro-crate-metadata.json at root_folder describing all inputs and outputs.
 
     `raw_inputs_by_sample_folder` is what `analyse_sample` found, so the crate and the
     BattINFO JSON-LD describe the same files. Without it the folders are re-classified,
     which finds the same technique files but no unmatched raw data.
+
+    `dataset_details` sets root dataset properties.
     """
+    details = dataset_details or {}
     crate = ROCrate()
-    crate.root_dataset["name"] = root_folder.name
-    crate.root_dataset["description"] = (
-        f"Flow battery electrochemical analysis produced by PyFlowBatt for {root_folder.name}"
+    crate.root_dataset["name"] = details.get("name", root_folder.name)
+    crate.root_dataset["description"] = details.get(
+        "description",
+        f"Flow battery electrochemical analysis produced by PyFlowBatt for {root_folder.name}",
     )
-    _add_license(crate)
+    for prop in ("datePublished", "identifier"):
+        if prop in details:
+            crate.root_dataset[prop] = details[prop]
+    _add_license(crate, str(details.get("license", LICENSE_URL)))
     _add_software_provenance(crate)
 
     all_sample_datasets = []
