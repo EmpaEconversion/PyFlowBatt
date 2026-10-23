@@ -1038,7 +1038,7 @@ def analyse_sample(
         path
         for ext in config.extensions
         for path in sorted(folder.glob(f"*{ext}"))
-        if path not in classified_files
+        if path not in classified_files and path not in mps_files  # protocols are inputs
     ]
     if other_raw:
         logger.info("- Found %d raw data file(s) not matching any technique", len(other_raw))

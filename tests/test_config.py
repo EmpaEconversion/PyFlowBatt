@@ -1049,6 +1049,45 @@ def test_analyse_sample_owns_file_list_and_keeps_sheet_descriptions(
     assert "lists empa__fcid000001/data.parquet, which is not a file" in caplog.text
 
 
+def test_analyse_sample_lists_protocol_once_as_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A protocol is only an input, even if .mps is a raw data extension and the sheet lists it."""
+    from pyflowbatt import analysis as analysis_module
+
+    root = tmp_path / "project"
+    sample = root / "sample_01"
+    sample.mkdir(parents=True)
+    (sample / "metadata.xlsx").write_text("x")
+    (sample / "cell.mps").write_text("EC-LAB SETTING FILE")
+    (sample / "pyflowbatt.toml").write_text('extra_extensions = [".mps"]\n')
+
+    def fake_convert(file: Path) -> dict:
+        jsonld = _fake_convert_with_references(file)
+        jsonld["hasInput"] = {
+            "@type": "dcat:Dataset",
+            "dcat:distribution": {
+                "dcterms:identifier": "sample_01/cell.mps",
+                "rdfs:comment": "Sheet protocol description",
+            },
+        }
+        return jsonld
+
+    monkeypatch.setattr(analysis_module, "convert_excel_to_jsonld", fake_convert)
+    config = analysis_module.PyFlowBattConfig.load(sample, home=tmp_path / "home")
+    analysis_module.analyse_sample(sample, save_format=None, config=config, root_folder=root)
+
+    metadata = json.loads((sample / "metadata.empa__fcid123456.json").read_text())
+    nodes = {}
+    for section in ("hasInput", "hasOutput"):
+        dist = metadata[section]["dcat:distribution"]
+        dist = dist if isinstance(dist, list) else [dist]
+        nodes[section] = [d for d in dist if d["@id"] == "sample_01/cell.mps"]
+    assert nodes["hasOutput"] == []
+    assert len(nodes["hasInput"]) == 1
+    assert nodes["hasInput"][0]["rdfs:comment"] == "Sheet protocol description"
+
+
 @pytest.mark.parametrize(
     ("node", "expected"),
     [

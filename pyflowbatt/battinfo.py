@@ -776,8 +776,6 @@ def add_data(
             "@type": ["dcat:Distribution", "RawData"],
             "rdfs:comment": "Raw electrochemical data in proprietary Biologic .mpr binary format",
         }
-    elif rel_file_path.endswith(".mps"):
-        additions = {"rdfs:comment": "Cycling protocol in text-based Biologic .mps format"}
     else:
         # Any other raw data file that happens to sit in the sample folder.
         additions = {"@type": ["dcat:Distribution", "RawData"]}
