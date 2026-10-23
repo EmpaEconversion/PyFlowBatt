@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "batterydf>=0.1.0,<0.2.0",
-    "battinfoconverter-backend>=3.3.1",
+    "battinfoconverter-backend>=3.4.0,<4.0.0",
     "fasteis==0.1.0",
     "matplotlib>=3.10.6",
     "pandas>=2.3.2",

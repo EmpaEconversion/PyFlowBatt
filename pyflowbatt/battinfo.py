@@ -4,11 +4,12 @@ import base64
 import io
 import json
 import logging
+import re
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
-from urllib.parse import quote
+from typing import Literal, NamedTuple
+from urllib.parse import quote, unquote
 
 import pandas as pd
 
@@ -18,6 +19,8 @@ from pyflowbatt.version import __title__, __url__, __version__
 logger = logging.getLogger(__name__)
 
 BDF_SCHEMA_IRI = "https://w3id.org/battery-data-alliance/ontology/battery-data-format/schema"
+# Record number in a Zenodo DOI (zenodo.123) or record page URL (/records/123, older /record/123)
+_ZENODO_RECORD_RE = re.compile(r"zenodo\.(\d+)|/records?/(\d+)")
 # DCAT expects dcat:mediaType values from the IANA register, as IRIs in this form
 IANA_MEDIA_TYPES = "http://www.iana.org/assignments/media-types/"
 
@@ -361,18 +364,157 @@ def dedupe_jsonld_list(lst: list) -> list:
     return deduped
 
 
+# Keys whose values from every source are combined instead of the higher priority one winning
+UNION_KEYS = {"@type", "dcat:distribution"}
+
+
+def _short(value: object, limit: int = 150) -> str:
+    """Compact one-line JSON for log messages."""
+    text = json.dumps(value, ensure_ascii=False)
+    return text if len(text) <= limit else text[:limit] + "..."
+
+
+def _union(high: object, low: object, names: tuple[str, str] | None, path: str) -> object:
+    """Combine two values or lists, merging nodes that share an @id."""
+    merged = deepcopy(high) if isinstance(high, list) else [deepcopy(high)]
+    for item in low if isinstance(low, list) else [low]:
+        match = next(
+            (
+                i
+                for i, existing in enumerate(merged)
+                if isinstance(item, dict)
+                and isinstance(existing, dict)
+                and item.get("@id") is not None
+                and existing.get("@id") == item.get("@id")
+            ),
+            None,
+        )
+        if match is not None:
+            merged[match] = priority_merge(merged[match], item, names=names, _path=path)
+        elif item not in merged:
+            merged.append(deepcopy(item))
+    return merged[0] if len(merged) == 1 else merged
+
+
+def priority_merge(
+    high: dict,
+    low: dict,
+    *,
+    names: tuple[str, str] | None = None,
+    _path: str = "",
+) -> dict:
+    """Merge two JSON-LD nodes, keeping the values of `high` where both set a key.
+
+    Keys in UNION_KEYS are combined instead, and @context blocks are merged. `names`
+    labels the two sources in a warning logged for each disagreement, None merges silently.
+    """
+    merged = deepcopy(high)
+    for key, low_value in low.items():
+        path = f"{_path}/{key}"
+        if key not in merged:
+            merged[key] = deepcopy(low_value)
+            continue
+        high_value = merged[key]
+        if key == "@context":
+            merged[key] = merge_contexts_strict(high_value, low_value, on_conflict="keep_left")
+        elif key in UNION_KEYS:
+            merged[key] = _union(high_value, low_value, names, path)
+        elif (
+            isinstance(high_value, dict)
+            and isinstance(low_value, dict)
+            and high_value.get("@id") == low_value.get("@id")
+        ):
+            merged[key] = priority_merge(high_value, low_value, names=names, _path=path)
+        elif high_value != low_value and names:
+            logger.warning(
+                "%s and %s disagree at %s, using %s: %s, ignoring: %s",
+                *names,
+                path.lstrip("/"),
+                names[0],
+                _short(high_value),
+                _short(low_value),
+            )
+    return merged
+
+
+def resolve_zenodo_url(battinfo_jsonld: dict, pub_info_url: str | None) -> str | None:
+    """Zenodo DOI URL of the dataset, from the BattINFO sheet or else publication info.
+
+    Raises ValueError if the two name different Zenodo records.
+    """
+    output = battinfo_jsonld.get("hasOutput")
+    access = output.get("dcat:accessURL") if isinstance(output, dict) else None
+    sheet_url = access.get("@id") if isinstance(access, dict) else access
+    if sheet_url and pub_info_url and zenodo_record_id(sheet_url) != zenodo_record_id(pub_info_url):
+        msg = (
+            f"Zenodo record mismatch: the BattINFO sheet gives {sheet_url} "
+            f"but publication info gives {pub_info_url}"
+        )
+        raise ValueError(msg)
+    return sheet_url or pub_info_url
+
+
+def _sheet_file_path(node: dict) -> str | None:
+    """Root-relative path of a file node written by the BattINFO converter.
+
+    Unpublished files carry the path as dcterms:identifier, published ones in their
+    download URL, after the "#" for a file inside a zip.
+    """
+    if node.get("dcterms:identifier"):
+        return node["dcterms:identifier"]
+    file_id = node.get("@id")
+    if not file_id:
+        return None
+    for separator in ("#", "/files/"):
+        if separator in file_id:
+            return unquote(file_id.split(separator, 1)[1])
+    return unquote(file_id)
+
+
+class SheetFile(NamedTuple):
+    """A file listed in the BattINFO sheet: its section (hasInput/hasOutput) and description."""
+
+    section: str
+    comment: str | None
+
+
+def pop_sheet_files(battinfo_jsonld: dict) -> dict[str, SheetFile]:
+    """Remove file nodes from the converter output, return each path's section and description."""
+    files: dict[str, SheetFile] = {}
+    for section in ("hasOutput", "hasInput"):
+        node = battinfo_jsonld.get(section)
+        if not isinstance(node, dict) or "dcat:distribution" not in node:
+            continue
+        distribution = node.pop("dcat:distribution")
+        for item in distribution if isinstance(distribution, list) else [distribution]:
+            path = _sheet_file_path(item) if isinstance(item, dict) else None
+            if path:
+                files[path] = SheetFile(section, item.get("rdfs:comment"))
+        # A section that only described files would leave its @type on pyflowbatt's files
+        if set(node) <= {"@type"}:
+            del battinfo_jsonld[section]
+    return files
+
+
+# Battery and cell classes in the ontology end with one of these, e.g. RedoxFlowBattery, CoinCell
+CELL_TYPE_SUFFIXES = ("Battery", "Cell")
+
+
 def make_test_object(battinfo_jsonld: dict) -> dict:
-    """Put BattINFO redox flow battery description inside a BatteryTest object."""
-    if battinfo_jsonld.get("@type") == "RedoxFlowBattery":
-        return {
-            "@context": battinfo_jsonld.pop("@context"),
-            "@type": "BatteryTest",
-            "hasTestObject": battinfo_jsonld,
-        }
+    """Put a BattINFO cell description inside a BatteryTest object, unless it is one already."""
     if battinfo_jsonld.get("@type") == "BatteryTest":
         return battinfo_jsonld
-    msg = "BattINFO JSON-LD must have RedoxFlowBattery or BatteryTest as top level @type"
-    raise ValueError(msg)
+    return {
+        "@context": battinfo_jsonld.pop("@context", {}),
+        "@type": "BatteryTest",
+        "hasTestObject": battinfo_jsonld,
+    }
+
+
+def is_cell_type(cell_type: object) -> bool:
+    """Check that a cell's @type looks like a battery or cell class, e.g. CoinCell."""
+    types = cell_type if isinstance(cell_type, list) else [cell_type]
+    return any(isinstance(t, str) and t.endswith(CELL_TYPE_SUFFIXES) for t in types)
 
 
 def add_input_and_output() -> dict:
@@ -486,56 +628,51 @@ def add_fcid_output(
     }
 
 
-def zenodo_record_id(zenodo_doi_url: str) -> str:
-    """Extract the numeric Zenodo record ID from a Zenodo DOI URL.
+def zenodo_record_id(zenodo_url: str) -> str:
+    """Extract the numeric Zenodo record ID from a Zenodo DOI or record page URL.
 
-    e.g. "https://doi.org/10.5281/zenodo.20338409" -> "20338409"
+    e.g. "https://doi.org/10.5281/zenodo.20338409" or "https://zenodo.org/records/20338409"
+    -> "20338409". Raises ValueError for a URL with neither form.
     """
-    return zenodo_doi_url.rsplit(".", maxsplit=1)[-1]
+    match = _ZENODO_RECORD_RE.search(zenodo_url)
+    if match is None:
+        msg = (
+            f"Cannot find a Zenodo record number in {zenodo_url!r}, expected e.g. "
+            "https://doi.org/10.5281/zenodo.12345678 or https://zenodo.org/records/12345678"
+        )
+        raise ValueError(msg)
+    return match.group(1) or match.group(2)
 
 
 def zenodo_download_url(
     root_rel_path: str,
     zenodo_doi_url: str | None,
     *,
-    package: Literal["zip", "files"] = "files",
     zip_filename: str | None = None,
 ) -> str | None:
-    """Build the Zenodo download URL for a file, once it is uploaded to Zenodo.
+    """Build the Zenodo download URL for a file inside the zip uploaded to Zenodo.
 
     This is the resolved *location* of the file (used for "dcat:downloadURL"),
     kept separate from its "@id" (identity), which stays the bare root-relative
     path everywhere so it matches the file's "@id" in the RO-Crate manifest.
+    Zenodo has no folders, so the root folder is uploaded as one zip. Zenodo cannot
+    link into a zip, so the path within it is a fragment after "#".
 
     Args:
         root_rel_path: path to the file relative to the root folder that gets
-            uploaded to Zenodo, e.g. sample_01/results/eis_post.bdf.parquet
+            zipped, e.g. sample_01/results/eis_post.bdf.parquet
         zenodo_doi_url: Zenodo archive DOI URL, e.g. https://doi.org/10.5281/zenodo.12345678
-        package: "zip" if the whole root folder is uploaded as a single zip (Zenodo
-            has no URL that deep-links into a file inside that zip, so the fragment
-            after "#" is only useful once the zip has been downloaded and extracted),
-            or "files" if every file is uploaded individually, preserving the folder
-            structure in the file's Zenodo "key" (in which case a direct download URL
-            can be built for it).
-        zip_filename: name of the zip file as uploaded to Zenodo (required when
-            package="zip").
+        zip_filename: name of the zip file as uploaded to Zenodo
 
     Returns:
-        A Zenodo URL identifying the file's download location, or None if no
-        zenodo_doi_url is given yet.
+        A Zenodo URL identifying the file's download location, or None without
+        both a zenodo_doi_url and a zip_filename.
 
     """
-    if not zenodo_doi_url:
+    if not zenodo_doi_url or not zip_filename:
         return None
-
     record_id = zenodo_record_id(zenodo_doi_url)
     base = f"https://zenodo.org/records/{record_id}/files"
-    if package == "files":
-        return f"{base}/{quote(root_rel_path)}"
-
-    if not zip_filename:
-        msg = "zip_filename is required when package='zip'"
-        raise ValueError(msg)
     return f"{base}/{quote(zip_filename, safe='')}#{quote(root_rel_path)}"
 
 
@@ -544,43 +681,66 @@ def add_input_data(
     zenodo_doi_url: str | None,
     comment: str | None = None,
     *,
-    package: Literal["zip", "files"] = "files",
     zip_filename: str | None = None,
 ) -> dict:
-    """Add links to raw input files to the hasInput section of json-ld output.
+    """Add links to input files, like protocols and metadata sheets, to the hasInput section.
+
+    Raw data files are outputs of the BatteryTest, see :func:`add_data`.
 
     Args:
         rel_file_path: path to file relative to the root folder uploaded to Zenodo,
-            e.g. sample_01/cell01_GCPL_01.mpr
+            e.g. sample_01/cell01_GCPL.mps
         zenodo_doi_url: optional Zenodo archive URL
         comment: human-readable description of what this file is
-        package: see :func:`zenodo_file_id`
-        zip_filename: see :func:`zenodo_file_id`
+        zip_filename: see :func:`zenodo_download_url`
 
     Returns:
         dict with "BatteryTest" as top level type.
 
     """
+    return {
+        "@type": "BatteryTest",
+        "hasInput": {
+            "@type": "dcat:Dataset",
+            "dcat:distribution": _file_node(rel_file_path, zenodo_doi_url, comment, zip_filename),
+        },
+    }
+
+
+def add_included_data(
+    rel_file_path: str,
+    zenodo_doi_url: str | None,
+    comment: str | None = None,
+    *,
+    zip_filename: str | None = None,
+) -> dict:
+    """Add a file listed in include_files to the hasOutput section, without inferring a type."""
+    return {
+        "@type": "BatteryTest",
+        "hasOutput": {
+            "dcat:distribution": _file_node(rel_file_path, zenodo_doi_url, comment, zip_filename),
+        },
+    }
+
+
+def _file_node(
+    rel_file_path: str,
+    zenodo_doi_url: str | None,
+    comment: str | None,
+    zip_filename: str | None,
+) -> dict:
+    """Describe one file as a dcat:Distribution."""
     dist: dict = {
         "@id": quote(rel_file_path),
         "@type": "dcat:Distribution",
         "dcat:mediaType": _media_type_node(rel_file_path),
     }
-    download_url = zenodo_download_url(
-        rel_file_path, zenodo_doi_url, package=package, zip_filename=zip_filename
-    )
+    download_url = zenodo_download_url(rel_file_path, zenodo_doi_url, zip_filename=zip_filename)
     if download_url:
         dist["dcat:downloadURL"] = {"@id": download_url}
     if comment:
         dist["rdfs:comment"] = comment
-
-    return {
-        "@type": "BatteryTest",
-        "hasInput": {
-            "@type": ["RawData", "dcat:Dataset"],
-            "dcat:distribution": dist,
-        },
-    }
+    return dist
 
 
 def add_data(
@@ -588,7 +748,6 @@ def add_data(
     zenodo_doi_url: str | None,
     extras: dict | None = None,
     *,
-    package: Literal["zip", "files"] = "files",
     zip_filename: str | None = None,
 ) -> dict:
     """Add links to data files to output section of json-ld output.
@@ -598,8 +757,7 @@ def add_data(
             e.g. empa__fcid01345/empa__fcid01345.bdf.parquet
         zenodo_doi_url: path to zenodo archive e.g. https://doi.org/10.1234/zenodo.12345678
         extras: dict with any extra terms to include in metadata
-        package: see :func:`zenodo_file_id`
-        zip_filename: see :func:`zenodo_file_id`
+        zip_filename: see :func:`zenodo_download_url`
 
     Returns:
         dict with "BatteryTest" as top level type.
@@ -636,8 +794,6 @@ def add_data(
             "@type": ["dcat:Distribution", "RawData"],
             "rdfs:comment": "Raw electrochemical data in proprietary Biologic .mpr binary format",
         }
-    elif rel_file_path.endswith(".mps"):
-        additions = {"rdfs:comment": "Cycling protocol in text-based Biologic .mps format"}
     else:
         # Any other raw data file that happens to sit in the sample folder.
         additions = {"@type": ["dcat:Distribution", "RawData"]}
@@ -649,9 +805,7 @@ def add_data(
         **additions,
         **extras,
     }
-    download_url = zenodo_download_url(
-        rel_file_path, zenodo_doi_url, package=package, zip_filename=zip_filename
-    )
+    download_url = zenodo_download_url(rel_file_path, zenodo_doi_url, zip_filename=zip_filename)
     if download_url:
         dist["dcat:downloadURL"] = {"@id": download_url}
 
@@ -794,14 +948,14 @@ def add_institution(
     inst_dict = {
         "@type": "BatteryTest",
         "hasOutput": {
-            "dc:publisher": {
+            "dcterms:publisher": {
                 "@type": "schema:ResearchOrganization",
             },
         },
     }
     if wikidata_url:
-        inst_dict["hasOutput"]["dc:publisher"]["@id"] = wikidata_url
-    inst_dict["hasOutput"]["dc:publisher"]["schema:name"] = name
+        inst_dict["hasOutput"]["dcterms:publisher"]["@id"] = wikidata_url
+    inst_dict["hasOutput"]["dcterms:publisher"]["schema:name"] = name
     return inst_dict
 
 
@@ -845,9 +999,7 @@ def parse_zenodo_info_xlsx(
         dict with zenodo info. The "General" sheet's rows are lowercased and
         underscored into keys, e.g. a "Zenodo Doi Url" row becomes "zenodo_doi_url".
         An optional "Zenodo Zip Filename" row overrides the default zip filename
-        (``<root folder name>.zip``) used by :func:`zenodo_file_id` when the CLI's
-        ``--zip`` flag is used; whether "zip" or "files" packaging applies is decided
-        by that flag, not by anything in this sheet.
+        (``<root folder name>.zip``) that the CLI's ``--zip`` flag writes.
 
     """
     if isinstance(xlsx_file, Path):

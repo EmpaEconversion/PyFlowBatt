@@ -137,10 +137,9 @@ def main() -> None:
         "--zip",
         action="store_true",
         help=(
-            "Zip the analysed folder afterwards and reference files in BattINFO metadata via "
-            "the zip's Zenodo download URL (for uploading one zip). Default: leave files "
-            "unzipped and reference each one via its own Zenodo download URL (for uploading "
-            "every file individually)."
+            "Package the analysed folder for Zenodo: zip it with an RO-Crate manifest inside, "
+            "and reference files in BattINFO metadata via the zip's Zenodo download URL. "
+            "Default: only analyse, without a zip or RO-Crate."
         ),
     )
     parser.add_argument(

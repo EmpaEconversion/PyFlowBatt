@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import logging
+import warnings
 from datetime import datetime
 from pathlib import Path
 
@@ -10,6 +13,7 @@ from rocrate.rocrate import ROCrate
 
 from pyflowbatt.analysis import (
     EXTRA_INPUT_DESCRIPTIONS,
+    INCLUDED_LABEL,
     OTHER_RAW_LABEL,
     OUTPUT_MISC_DESCRIPTIONS,
     _custom_eis_tag,
@@ -20,9 +24,11 @@ from pyflowbatt.analysis import (
     plot_description,
     raw_description,
 )
-from pyflowbatt.config import PyFlowBattConfig, classify_technique_files
+from pyflowbatt.config import CONFIG_FILENAME, PyFlowBattConfig, classify_technique_files
 from pyflowbatt.media_types import media_type
 from pyflowbatt.version import __title__, __url__, __version__
+
+logger = logging.getLogger(__name__)
 
 MEASUREMENT_LABELS: dict[str, str] = {
     "gcpl": "Galvanostatic Cycling with Potential Limitation",
@@ -52,6 +58,15 @@ def _measurement_technique(label: str) -> str:
 
 LICENSE_URL = "https://creativecommons.org/licenses/by/4.0/"
 
+# BattINFO dataset terms: RO-Crate root dataset property
+DATASET_TERMS = {
+    "dcterms:title": "name",
+    "dcterms:description": "description",
+    "dcterms:license": "license",
+    "schema:datePublished": "datePublished",
+    "dcat:accessURL": "identifier",
+}
+
 
 def _unwrap_len_1_list(entities: list) -> object | None:
     """Unwrap a one element list."""
@@ -66,6 +81,8 @@ def _output_description(label: str, path: Path) -> str | None:
     Shared with the descriptions `analyse_sample` writes into BattINFO JSON-LD,
     so a plot and its companion data file get distinct, consistent wording.
     """
+    if label == INCLUDED_LABEL:
+        return OUTPUT_MISC_DESCRIPTIONS[label]
     if path.suffix == ".png":
         return plot_description(label)
     if path.suffix in (".parquet", ".csv"):
@@ -87,20 +104,43 @@ def _classify_inputs(
     return classify_technique_files(sample_folder, config)
 
 
-def _add_license(crate: ROCrate) -> None:
+def _add_license(crate: ROCrate, license_url: str = LICENSE_URL) -> None:
     """Describe the crate licence as a contextual entity, not just a bare URL."""
-    license_entity = crate.add(
-        ContextEntity(
-            crate,
-            identifier=LICENSE_URL,
-            properties={
-                "@type": "CreativeWork",
-                "name": "CC BY 4.0",
-                "description": "Creative Commons Attribution 4.0 International License",
-            },
-        )
-    )
+    properties = {"@type": "CreativeWork"}
+    if license_url == LICENSE_URL:
+        properties["name"] = "CC BY 4.0"
+        properties["description"] = "Creative Commons Attribution 4.0 International License"
+    license_entity = crate.add(ContextEntity(crate, identifier=license_url, properties=properties))
     crate.root_dataset["license"] = license_entity
+
+
+def _iri(value: object) -> object:
+    """Return the IRI of a JSON-LD node reference, or the value itself."""
+    return value["@id"] if isinstance(value, dict) and "@id" in value else value
+
+
+def agreed_dataset_details(battinfo_docs: list[dict]) -> dict[str, object]:
+    """Root dataset properties that every sample's BattINFO metadata agrees on.
+
+    A term the samples disagree on is left out with a warning, so the crate keeps its own.
+    """
+    details: dict[str, object] = {}
+    for term, prop in DATASET_TERMS.items():
+        values: list[object] = []
+        for doc in battinfo_docs:
+            output = doc.get("hasOutput")
+            value = _iri(output.get(term)) if isinstance(output, dict) else None
+            if value is not None and value not in values:
+                values.append(value)
+        if len(values) == 1:
+            details[prop] = values[0]
+        elif values:
+            logger.warning(
+                "Samples' BattINFO metadata disagree on %s, the RO-Crate uses its own value: %s",
+                term,
+                values,
+            )
+    return details
 
 
 def _add_software_provenance(crate: ROCrate) -> None:
@@ -136,19 +176,43 @@ def write_rocrate(
     configs_by_sample_folder: dict[Path, PyFlowBattConfig] | None = None,
     sample_ids_by_sample_folder: dict[Path, str] | None = None,
     raw_inputs_by_sample_folder: dict[Path, dict[str, list[Path]]] | None = None,
+    dataset_details: dict[str, object] | None = None,
+    root_included: list[Path] | None = None,
+    settings_files: list[str] | None = None,
 ) -> None:
     """Write ro-crate-metadata.json at root_folder describing all inputs and outputs.
 
     `raw_inputs_by_sample_folder` is what `analyse_sample` found, so the crate and the
     BattINFO JSON-LD describe the same files. Without it the folders are re-classified,
     which finds the same technique files but no unmatched raw data.
+
+    `dataset_details` sets root dataset properties, by default the ones the samples'
+    BattINFO metadata agree on. `root_included` are files outside the sample folders
+    matched by include_files. `settings_files` are root-relative paths of resolved
+    pyflowbatt.toml files that only exist in the zip, so they are described but never
+    written to root_folder.
     """
+    if dataset_details is None:
+        dataset_details = agreed_dataset_details(
+            [
+                json.loads(path.read_text(encoding="utf-8"))
+                for tracked in tracked_by_sample_folder.values()
+                for path in tracked.get("metadata", [])
+                if path.exists()
+            ]
+        )
+    details = dataset_details
+    pending_settings = set(settings_files or [])
     crate = ROCrate()
-    crate.root_dataset["name"] = root_folder.name
-    crate.root_dataset["description"] = (
-        f"Flow battery electrochemical analysis produced by PyFlowBatt for {root_folder.name}"
+    crate.root_dataset["name"] = details.get("name", root_folder.name)
+    crate.root_dataset["description"] = details.get(
+        "description",
+        f"Flow battery electrochemical analysis produced by PyFlowBatt for {root_folder.name}",
     )
-    _add_license(crate)
+    for prop in ("datePublished", "identifier"):
+        if prop in details:
+            crate.root_dataset[prop] = details[prop]
+    _add_license(crate, str(details.get("license", LICENSE_URL)))
     _add_software_provenance(crate)
 
     all_sample_datasets = []
@@ -231,7 +295,9 @@ def write_rocrate(
                 extra_entities[label] = label_extra_ents
 
         for label, paths in tracked_by_sample_folder.get(sample_folder, {}).items():
-            if label == "metadata":
+            if label == INCLUDED_LABEL:
+                derived_from = None
+            elif label == "metadata":
                 derived_from = _unwrap_len_1_list(
                     [
                         ent
@@ -246,11 +312,9 @@ def write_rocrate(
             for path in paths:
                 if not path.exists():
                     continue
-                props: dict = {
-                    "name": path.name,
-                    "encodingFormat": media_type(path),
-                    "wasDerivedFrom": derived_from,
-                }
+                props: dict = {"name": path.name, "encodingFormat": media_type(path)}
+                if derived_from is not None:
+                    props["wasDerivedFrom"] = derived_from
                 desc = _output_description(label, path)
                 if desc:
                     props["description"] = desc
@@ -258,6 +322,11 @@ def write_rocrate(
                     str(path), dest_path=_rel(path, root_folder), properties=props
                 )
                 sample_file_entities.append(output_ent)
+
+        settings_rel = _rel(sample_folder / CONFIG_FILENAME, root_folder)
+        if settings_rel in pending_settings:
+            pending_settings.discard(settings_rel)
+            sample_file_entities.append(_add_settings_file(crate, settings_rel))
 
         sample_dataset["hasPart"] = sample_file_entities  # type: ignore[index]
 
@@ -274,4 +343,34 @@ def write_rocrate(
             },
         )
 
-    crate.write(str(root_folder))
+    for path in root_included or []:
+        crate.add_file(
+            str(path),
+            dest_path=_rel(path, root_folder),
+            properties={
+                "name": path.name,
+                "encodingFormat": media_type(path),
+                "description": OUTPUT_MISC_DESCRIPTIONS[INCLUDED_LABEL],
+            },
+        )
+
+    for settings_rel in sorted(pending_settings):
+        _add_settings_file(crate, settings_rel)
+
+    with warnings.catch_warnings():
+        # Settings files have no source on disk, they are written into the zip instead
+        warnings.filterwarnings("ignore", message="No source for", category=UserWarning)
+        crate.write(str(root_folder))
+
+
+def _add_settings_file(crate: ROCrate, rel: str) -> object:
+    """Describe a resolved pyflowbatt.toml without a source, so the crate never writes it."""
+    return crate.add_file(
+        None,
+        dest_path=rel,
+        properties={
+            "name": CONFIG_FILENAME,
+            "encodingFormat": media_type(Path(rel)),
+            "description": EXTRA_INPUT_DESCRIPTIONS["settings"],
+        },
+    )

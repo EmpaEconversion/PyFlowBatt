@@ -6,8 +6,9 @@ import logging
 import re
 import uuid
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal
+from urllib.parse import unquote
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -16,6 +17,7 @@ from battinfoconverter_backend import convert_excel_to_jsonld
 
 from pyflowbatt import battinfo, cv, eis, gcpl, lsv, ocv
 from pyflowbatt.config import (
+    CONFIG_FILENAME,
     DEFAULT_AREA_CM2,
     EIS_TAGS,
     PyFlowBattConfig,
@@ -27,6 +29,7 @@ from pyflowbatt.report import LOG_FILENAME, Reporter
 logger = logging.getLogger(__name__)
 
 SAVE_FORMATS = Literal["parquet", "csv"] | None
+ROCRATE_FILENAME = "ro-crate-metadata.json"
 DEFAULT_DEPTH = 6  # Default max search depth in folders
 DEFAULT_SEARCH = 10000  # Default max number of folders searched
 
@@ -122,13 +125,18 @@ OUTPUT_DATA_DESCRIPTIONS: dict[str, str] = {
 OUTPUT_MISC_DESCRIPTIONS: dict[str, str] = {
     "summary": "Per-sample analysis summary",
     "metadata": "BattINFO JSON-LD metadata",
+    "included": "Additional file included with the dataset",
 }
+
+# Label for files matched by include_files in pyflowbatt.toml
+INCLUDED_LABEL = "included"
 
 # Descriptions for extra tracked inputs (protocol file, BattINFO xlsx), keyed by label.
 EXTRA_INPUT_DESCRIPTIONS: dict[str, str] = {
     "protocol": "EC-Lab measurement protocol (.mps)",
     "battinfo_xlsx": "BattINFO converter Excel metadata input",
     "pub_info": "Publication and Zenodo deposition Excel metadata input",
+    "settings": "PyFlowBatt settings used here, combining all pyflowbatt.toml files",
 }
 
 # Label for raw data files in a sample folder that no technique pattern matched.
@@ -357,7 +365,7 @@ def _extract_electrode_area_cm2(raw_battinfo_json: dict, electrode_key: str) -> 
     electrode = raw_battinfo_json.get(electrode_key)
     if not isinstance(electrode, dict):
         return None
-    substrate = electrode.get("Substrate")
+    substrate = electrode.get("hasSubstrate") or electrode.get("Substrate")  # old schema name
     if not isinstance(substrate, dict):
         return None
     properties = substrate.get("hasMeasuredProperty") or []
@@ -450,24 +458,131 @@ def check_path_writable(path: Path) -> None:
         probe.unlink()
 
 
-def zip_folder(root_folder: Path, zip_path: Path) -> Path:
-    """Zip every file in root_folder into zip_path, with no wrapping top-level directory.
+def is_pyflowbatt_file(path: Path) -> bool:
+    """Check for files PyFlowBatt writes or reads as settings, which it always adds itself."""
+    name = path.name
+    return name in {CONFIG_FILENAME, LOG_FILENAME, "combined_summary.xlsx"} or (
+        name.startswith("metadata.") and name.endswith(".json")
+    )
+
+
+def find_included_files(folder: Path, patterns: list[str]) -> list[Path]:
+    """Files in folder matching any include_files glob pattern, in a stable order.
+
+    Matches outside folder, e.g. from "../" in a pattern, are left out with a warning.
+    """
+    base = folder.resolve()
+    found = set()
+    for pattern in patterns:
+        try:
+            matches = list(folder.glob(pattern))
+        except (NotImplementedError, ValueError):
+            logger.warning("Ignoring include_files pattern %r: it must be relative", pattern)
+            continue
+        for path in matches:
+            resolved = path.resolve()
+            if not resolved.is_relative_to(base):
+                logger.warning(
+                    "Ignoring %s from include_files pattern %r: it is outside %s",
+                    resolved,
+                    pattern,
+                    folder,
+                )
+            elif path.is_file() and not is_pyflowbatt_file(path):
+                found.add(folder / resolved.relative_to(base))
+    return sorted(found)
+
+
+def _silently_skipped(file: Path) -> bool:
+    """Check for hidden EC-lab files, Excel lock files, the PyFlowBatt log and config files.
+
+    The zip holds resolved pyflowbatt.toml files in place of the originals.
+    """
+    return (
+        file.suffix in {".mgr", ".sta", ".mpp", ".mgp"}
+        or file.name.startswith("~$")
+        or file.name in {LOG_FILENAME, CONFIG_FILENAME}
+    )
+
+
+def crate_file_paths(crate_path: Path) -> list[str]:
+    """Root-relative paths of the files an RO-Crate manifest describes."""
+    crate = json.loads(crate_path.read_text(encoding="utf-8"))
+    paths = []
+    for entity in crate["@graph"]:
+        types = entity["@type"] if isinstance(entity["@type"], list) else [entity["@type"]]
+        if "File" in types:
+            paths.append(unquote(entity["@id"]))
+    return paths
+
+
+def resolved_settings(
+    root_folder: Path,
+    configs_by_sample_folder: dict[Path, PyFlowBattConfig],
+    root_config: PyFlowBattConfig,
+) -> dict[str, str]:
+    """Write resolved pyflowbatt.toml text for the root and each sample folder, by path."""
+    settings = {
+        _rel(sample_folder / CONFIG_FILENAME, root_folder): config.to_resolved_toml()
+        for sample_folder, config in configs_by_sample_folder.items()
+    }
+    settings.setdefault(CONFIG_FILENAME, root_config.to_resolved_toml())
+    return settings
+
+
+def _escapes_root(rel: str) -> bool:
+    """Check if a zip entry name is absolute or climbs out with "..", so could extract anywhere."""
+    posix = rel.replace("\\", "/")
+    return (
+        posix.startswith("/")
+        or re.match(r"^[A-Za-z]:", posix) is not None
+        or ".." in PurePosixPath(posix).parts
+    )
+
+
+def zip_folder(
+    root_folder: Path,
+    zip_path: Path,
+    members: list[str],
+    generated: dict[str, str] | None = None,
+) -> Path:
+    """Zip the listed root-relative files into zip_path, with no wrapping top-level directory.
 
     Archive members are root_folder-relative paths, matching the "@id"s used for
     files in both the RO-Crate manifest and BattINFO metadata, so a file's "@id"
-    can be found directly inside the zip once it's extracted.
-
-    Ignores hidden EC-lab files, Excel lock files and the PyFlowBatt log.
+    can be found directly inside the zip once it's extracted. Other files in
+    root_folder are left out with a warning. `generated` maps archive paths to text
+    written straight into the zip, never to root_folder. Entries that could extract
+    outside the target folder, like "../x" or "C:/x", are never written.
     """
+    generated = generated or {}
+    unsafe = sorted(rel for rel in {*members, *generated} if _escapes_root(rel))
+    if unsafe:
+        logger.warning("Not zipping %s: zip entries must stay inside the zipped folder", unsafe)
+    generated = {rel: text for rel, text in generated.items() if rel not in unsafe}
+    wanted = set(members) - set(unsafe)
+    skipped = [
+        rel
+        for file in sorted(root_folder.rglob("*"))
+        if file.is_file()
+        and not _silently_skipped(file)
+        and (rel := _rel(file, root_folder)) not in wanted
+    ]
+    if skipped:
+        shown = ", ".join(skipped[:10]) + (
+            f" and {len(skipped) - 10} more" if len(skipped) > 10 else ""
+        )
+        logger.warning(
+            "Not zipping %d file(s) the metadata doesn't describe, "
+            "add them to include_files in pyflowbatt.toml to package them: %s",
+            len(skipped),
+            shown,
+        )
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for file in sorted(root_folder.rglob("*")):
-            if (
-                file.is_file()
-                and file.suffix not in {".mgr", ".sta", ".mpp", ".mgp"}
-                and not file.name.startswith("~$")
-                and file.name != LOG_FILENAME
-            ):
-                zf.write(file, arcname=_rel(file, root_folder))
+        for rel in sorted(wanted - set(generated)):
+            zf.write(root_folder / rel, arcname=rel)
+        for rel, text in sorted(generated.items()):
+            zf.writestr(rel, text)
     return zip_path
 
 
@@ -493,7 +608,7 @@ def analyse_sample(
     save_format: SAVE_FORMATS = "parquet",
     config: PyFlowBattConfig | None = None,
     root_folder: str | Path | None = None,
-    zenodo_package: Literal["zip", "files"] = "files",
+    zip_filename: str | None = None,
     reporter: Reporter | None = None,
 ) -> tuple[dict[str, list[Path]], dict[str, list[Path]], dict[str, list[Path]], str | None, str]:
     """Read all the files in a folder, analayse and plot everything.
@@ -512,16 +627,15 @@ def analyse_sample(
     and match where the file actually sits once the root folder is packaged for Zenodo.
     Every file's "@id" is this bare root-relative path, matching its "@id" in the
     RO-Crate manifest (ro-crate-metadata.json); this deliberately never changes with
-    ``zenodo_package`` or Zenodo upload, so the two documents can be cross-referenced by
-    "@id" alone.
+    zipping or Zenodo upload, so the two documents can be cross-referenced by "@id" alone.
 
     ``pub_info_path`` is the xlsx ``pub_info`` was parsed from; when given it is recorded
-    as an input alongside the protocol and BattINFO xlsx files.
+    as an input alongside the protocol and BattINFO xlsx files. Dataset details from the
+    BattINFO sheet take priority over ``pub_info``, which takes priority over defaults.
 
-    ``zenodo_package`` controls how the resolved "dcat:downloadURL" (a separate property
-    from "@id") points at Zenodo-hosted files, once ``pub_info["zenodo_doi_url"]`` is
-    known: "files" (default) points directly at each file's own Zenodo download URL
-    (matching an unzipped upload); "zip" points at one zip's Zenodo download URL with the
+    ``zip_filename`` is the zip the root folder is packaged into for Zenodo. With it, and
+    a Zenodo record from the BattINFO sheet's Dataset URL or ``pub_info["zenodo_doi_url"]``,
+    each file gets a "dcat:downloadURL" (separate from its "@id") into that zip, with the
     in-archive path as a fragment (see :func:`pyflowbatt.battinfo.zenodo_download_url`).
 
     ``reporter`` is told when each step starts and finishes, to show progress.
@@ -596,7 +710,9 @@ def analyse_sample(
 
     battinfo_json = None
     battinfo_sample_id = None
-    raw_battinfo_json: dict | None = None
+    battinfo_cell: dict | None = None
+    zenodo_url: str | None = None
+    sheet_files: dict[str, str | None] = {}
     if not battinfo_files:
         logger.debug("No BattINFO xlsx found, skipping")
         reporter.skip("BattINFO", "no xlsx")
@@ -609,55 +725,70 @@ def analyse_sample(
                 if raw_json is None:
                     continue
                 battinfo_xlsx_path = file
-                fcid = raw_json["schema:productID"]
-                battinfo_sample_id = raw_json["schema:name"]
-                raw_battinfo_json = raw_json
+                # The cell might already be in a BatteryTest
                 battinfo_json = battinfo.make_test_object(raw_json)
+                battinfo_cell = battinfo_json["hasTestObject"]
+                if not battinfo.is_cell_type(battinfo_cell.get("@type")):
+                    logger.warning(
+                        "Cell type %r in %s doesn't look like a battery or cell class, "
+                        "the metadata will describe the tested object as that",
+                        battinfo_cell.get("@type"),
+                        _rel(file, root_folder),
+                    )
+                fcid = battinfo_cell["schema:productID"]
+                battinfo_sample_id = battinfo_cell["schema:name"]
+                # pyflowbatt lists the files it finds, the sheet only adds descriptions
+                sheet_files = battinfo.pop_sheet_files(battinfo_json)
+                zenodo_url = battinfo.resolve_zenodo_url(
+                    battinfo_json, pub_info.get("zenodo_doi_url")
+                )
 
-                # Create list of everything that can be included in JSON-LD
-                merge_list = [
+                # Publication info only fills what the BattINFO sheet leaves out
+                pub_list: list[dict] = [{"@type": "BatteryTest"}]
+                if zenodo_url:
+                    pub_list.append(battinfo.add_zenodo_url(zenodo_url))
+                if pub_info.get("citation_string"):
+                    pub_list.append(battinfo.add_citation(pub_info["citation_string"]))
+                if pub_info.get("institution"):
+                    pub_list.append(
+                        battinfo.add_institution(
+                            pub_info["institution"],
+                            pub_info.get("institutions", {})
+                            .get(pub_info["institution"], {})
+                            .get("wikidata_url"),
+                        )
+                    )
+                if pub_info.get("authors") and pub_info.get("institutions"):
+                    pub_list.append(
+                        battinfo.add_authors(pub_info["authors"], pub_info["institutions"]),
+                    )
+                if pub_info.get("sample_to_fig"):
+                    pub_list.append(
+                        battinfo.add_associated_media(
+                            pub_info.get("publication_doi_url"),
+                            pub_info["sample_to_fig"],
+                            fcid,
+                            battinfo_sample_id,
+                        ),
+                    )
+                defaults = battinfo.merge_jsonld_on_type(
+                    [battinfo.add_input_and_output(), battinfo.add_software()]
+                )
+
+                battinfo_json = battinfo.priority_merge(
                     battinfo_json,
-                    battinfo.add_input_and_output(),
-                    battinfo.add_software(),
-                ]
-                if pub_info:
-                    if pub_info.get("zenodo_doi_url"):
-                        merge_list.append(battinfo.add_zenodo_url(pub_info["zenodo_doi_url"]))
-                    if pub_info.get("citation_string"):
-                        merge_list.append(battinfo.add_citation(pub_info["citation_string"]))
-                    if pub_info.get("institution"):
-                        merge_list.append(
-                            battinfo.add_institution(
-                                pub_info["institution"],
-                                pub_info.get("institutions", {})
-                                .get(pub_info["institution"], {})
-                                .get("wikidata_url"),
-                            )
-                        )
-                    if pub_info.get("authors") and pub_info.get("institutions"):
-                        merge_list.append(
-                            battinfo.add_authors(pub_info["authors"], pub_info["institutions"]),
-                        )
-                    if pub_info.get("sample_to_fig"):
-                        merge_list.append(
-                            battinfo.add_associated_media(
-                                pub_info.get("publication_doi_url"),
-                                pub_info["sample_to_fig"],
-                                fcid,
-                                battinfo_sample_id,
-                            ),
-                        )
-
-                # Merge everything
-                battinfo_json = battinfo.merge_jsonld_on_type(merge_list)
+                    battinfo.merge_jsonld_on_type(pub_list),
+                    names=("BattINFO sheet", "publication info"),
+                )
+                battinfo_json = battinfo.priority_merge(battinfo_json, defaults)
                 break
             else:
                 logger.warning("Couldn't convert any xlsx to BattINFO, no metadata written")
 
     sample_id = get_sampleid_from_folderpath(folder, config, battinfo_sample_id)
-    area_cm2 = get_area_cm2(config, raw_battinfo_json)
+    area_cm2 = get_area_cm2(config, battinfo_cell)
     assembled_resistance_ohm = get_assembled_resistance_ohm(
-        config, raw_battinfo_json, gcpl_files[0].stem if gcpl_files else None
+        config, battinfo_cell, gcpl_files[0].stem if gcpl_files else None
     )
 
     av_ocv = (np.nan, np.nan)
@@ -947,11 +1078,13 @@ def analyse_sample(
     # metadata describes the data that ships rather than only what could be analysed.
     raw_inputs: dict[str, list[Path]] = {label: list(paths) for label, paths in classified.items()}
     classified_files = {path for paths in classified.values() for path in paths}
+    # Protocols, the BattINFO sheet and PyFlowBatt's own files are added in their own role
+    own_inputs = {*mps_files, *([battinfo_xlsx_path] if battinfo_xlsx_path else [])}
     other_raw = [
         path
         for ext in config.extensions
         for path in sorted(folder.glob(f"*{ext}"))
-        if path not in classified_files
+        if path not in classified_files and path not in own_inputs and not is_pyflowbatt_file(path)
     ]
     if other_raw:
         logger.info("- Found %d raw data file(s) not matching any technique", len(other_raw))
@@ -965,65 +1098,94 @@ def analyse_sample(
     if pub_info_path and pub_info_path != battinfo_xlsx_path:
         tracked_extra_inputs["pub_info"] = [pub_info_path]
 
+    already_tracked = {
+        path
+        for group in (raw_inputs, tracked_extra_inputs, tracked_outputs)
+        for paths in group.values()
+        for path in paths
+    }
+    # Files the BattINFO sheet asks for are included like include_files, if in this sample
+    sheet_requested = {
+        root_folder / rel
+        for rel in sheet_files
+        if (root_folder / rel).is_file()
+        and (root_folder / rel).resolve().is_relative_to(folder.resolve())
+        and not is_pyflowbatt_file(root_folder / rel)
+    }
+    included = sorted(
+        {*find_included_files(folder, config.include_files), *sheet_requested} - already_tracked
+    )
+    if included:
+        tracked_outputs[INCLUDED_LABEL] = included
+
     if battinfo_json is not None:
         with reporter.task("Metadata"):
-            zenodo_url = pub_info.get("zenodo_doi_url") if pub_info else None
-            zenodo_zip_filename = pub_info.get("zenodo_zip_filename") or f"{root_folder.name}.zip"
+
+            def describe(rel: str, default: str | None) -> str | None:
+                """Prefer the BattINFO sheet's description of a file over pyflowbatt's."""
+                sheet_file = sheet_files.pop(rel, None)
+                return (sheet_file.comment if sheet_file else None) or default
+
             for label, paths in raw_inputs.items():
                 for path in paths:
+                    rel = _rel(path, root_folder)
                     snippet = battinfo.add_data(
-                        _rel(path, root_folder),
+                        rel,
                         zenodo_url,
-                        extras={"rdfs:comment": raw_description(label, path)},
-                        package=zenodo_package,
-                        zip_filename=zenodo_zip_filename,
+                        extras={"rdfs:comment": describe(rel, raw_description(label, path))},
+                        zip_filename=zip_filename,
                     )
                     battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
-            for path in mps_files:
+            input_files = [
+                *((path, "protocol") for path in mps_files),
+                *((path, "battinfo_xlsx") for path in [battinfo_xlsx_path] if path),
+                *((path, "pub_info") for path in tracked_extra_inputs.get("pub_info", [])),
+                # Only exists in the zip, written from the resolved settings
+                *([(folder / CONFIG_FILENAME, "settings")] if zip_filename else []),
+            ]
+            for path, label in input_files:
+                rel = _rel(path, root_folder)
                 snippet = battinfo.add_input_data(
-                    _rel(path, root_folder),
+                    rel,
                     zenodo_url,
-                    EXTRA_INPUT_DESCRIPTIONS["protocol"],
-                    package=zenodo_package,
-                    zip_filename=zenodo_zip_filename,
-                )
-                battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
-            if battinfo_xlsx_path:
-                snippet = battinfo.add_input_data(
-                    _rel(battinfo_xlsx_path, root_folder),
-                    zenodo_url,
-                    EXTRA_INPUT_DESCRIPTIONS["battinfo_xlsx"],
-                    package=zenodo_package,
-                    zip_filename=zenodo_zip_filename,
-                )
-                battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
-            for path in tracked_extra_inputs.get("pub_info", []):
-                snippet = battinfo.add_input_data(
-                    _rel(path, root_folder),
-                    zenodo_url,
-                    EXTRA_INPUT_DESCRIPTIONS["pub_info"],
-                    package=zenodo_package,
-                    zip_filename=zenodo_zip_filename,
+                    describe(rel, EXTRA_INPUT_DESCRIPTIONS[label]),
+                    zip_filename=zip_filename,
                 )
                 battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
             for label, label_paths in tracked_outputs.items():
                 for path in label_paths:
                     rel = _rel(path, root_folder)
+                    if label == INCLUDED_LABEL:
+                        # Input file rows in the BattINFO sheet stay inputs
+                        sheet_file = sheet_files.get(rel)
+                        is_input = sheet_file is not None and sheet_file.section == "hasInput"
+                        add = battinfo.add_input_data if is_input else battinfo.add_included_data
+                        snippet = add(
+                            rel,
+                            zenodo_url,
+                            describe(rel, OUTPUT_MISC_DESCRIPTIONS[label]),
+                            zip_filename=zip_filename,
+                        )
+                        battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
+                        continue
                     if path.suffix == ".png":
                         comment = plot_description(label)
                     elif rel.endswith((".parquet", ".csv")):
                         comment = data_description(label)
                     else:
                         comment = OUTPUT_MISC_DESCRIPTIONS.get(label)
+                    comment = describe(rel, comment)
                     extras = {"rdfs:comment": comment} if comment else None
                     snippet = battinfo.add_data(
                         rel,
                         zenodo_url,
                         extras=extras,
-                        package=zenodo_package,
-                        zip_filename=zenodo_zip_filename,
+                        zip_filename=zip_filename,
                     )
                     battinfo_json = battinfo.merge_jsonld_on_type([battinfo_json, snippet])
+            for rel in sheet_files:
+                where = "outside this sample folder" if (root_folder / rel).is_file() else "missing"
+                logger.warning("The BattINFO sheet lists %s, which is %s, ignoring it", rel, where)
             metadata_path = folder / f"metadata.{fcid or sample_id}.json"
             with metadata_path.open("w", encoding="utf-8") as mf:
                 json.dump(battinfo_json, mf, indent=4, ensure_ascii=False)
@@ -1171,17 +1333,15 @@ def analyse_all_samples(  # noqa: PLR0913
     """Take a folder and run all analysis.
 
     If ``zip_output`` is True, everything is zipped into a single zip file next to
-    ``folder`` once analysis finishes, and BattINFO "@id"s reference that zip's Zenodo
-    download URL with the in-archive path as a fragment. Otherwise (the default),
-    files are left unzipped and "@id"s reference each file's own Zenodo download URL
-    directly, for uploading every file individually.
+    ``folder`` once analysis finishes, for uploading to Zenodo. The zip holds an RO-Crate
+    manifest, and BattINFO files get download URLs into the zip. Otherwise (the default)
+    only the analysis results and BattINFO metadata are written.
 
     ``reporter`` is told when each sample and step starts and finishes, to show progress.
     """
     folder = Path(folder).resolve()
     reporter = reporter or Reporter()
     pub_info, pub_info_path = pub_info_from_root(folder)
-    zenodo_package: Literal["zip", "files"] = "zip" if zip_output else "files"
     zip_filename = pub_info.get("zenodo_zip_filename") or f"{folder.name}.zip"
     if zip_output:
         check_path_writable(folder.parent / zip_filename)
@@ -1217,7 +1377,7 @@ def analyse_all_samples(  # noqa: PLR0913
                 pub_info_path=pub_info_path,
                 config=configs_by_sample_folder[sample_folder],
                 root_folder=folder,
-                zenodo_package=zenodo_package,
+                zip_filename=zip_filename if zip_output else None,
                 reporter=reporter,
             )
 
@@ -1227,8 +1387,7 @@ def analyse_all_samples(  # noqa: PLR0913
         reporter.plan(
             [
                 *(["Combined summary"] if len(sample_folders) > 1 else []),
-                "RO-Crate",
-                *(["Zip"] if zip_output else []),
+                *(["RO-Crate", "Zip"] if zip_output else []),
             ]
         )
         if len(sample_folders) > 1:
@@ -1245,24 +1404,49 @@ def analyse_all_samples(  # noqa: PLR0913
                 workbook.close()
                 logger.debug("Combined all the results into one big summary")
 
-        with reporter.task("RO-Crate", detail="ro-crate-metadata.json"):
-            write_rocrate(
-                folder,
-                sample_folders,
-                tracked_by_sample_folder,
-                tracked_extras_by_sample_folder,
-                fcids_by_sample_folder,
-                configs_by_sample_folder,
-                sample_ids_by_sample_folder,
-                raw_inputs_by_sample_folder,
-            )
-            logger.debug("Written RO-Crate metadata to %s", folder / "ro-crate-metadata.json")
-
         if zip_output:
+            crate_path = folder / ROCRATE_FILENAME
             zip_path = folder.parent / zip_filename
-            with reporter.task("Zip", detail=str(zip_path)):
-                zip_folder(folder, zip_path)
-                logger.debug("Zipped everything into %s", zip_path)
+            settings = resolved_settings(folder, configs_by_sample_folder, search_config)
+            try:
+                with reporter.task("RO-Crate", detail=ROCRATE_FILENAME):
+                    root_included = [
+                        path
+                        for path in find_included_files(folder, search_config.include_files)
+                        if not any(
+                            path in paths
+                            for by_sample in (
+                                tracked_by_sample_folder,
+                                tracked_extras_by_sample_folder,
+                                raw_inputs_by_sample_folder,
+                            )
+                            for tracked in by_sample.values()
+                            for paths in tracked.values()
+                        )
+                    ]
+                    write_rocrate(
+                        folder,
+                        sample_folders,
+                        tracked_by_sample_folder,
+                        tracked_extras_by_sample_folder,
+                        fcids_by_sample_folder,
+                        configs_by_sample_folder,
+                        sample_ids_by_sample_folder,
+                        raw_inputs_by_sample_folder,
+                        root_included=root_included,
+                        settings_files=list(settings),
+                    )
+                with reporter.task("Zip", detail=str(zip_path)):
+                    zip_folder(
+                        folder,
+                        zip_path,
+                        [*crate_file_paths(crate_path), ROCRATE_FILENAME],
+                        generated=settings,
+                    )
+                    logger.debug("Zipped everything into %s", zip_path)
+            finally:
+                # The ro-crate metadata only exists in the zip
+                crate_path.unlink(missing_ok=True)
 
     reporter.finish()
 
@@ -1321,11 +1505,16 @@ def dry_analyse_all_samples(
         )
     if zip_output:
         zip_filename = pub_info.get("zenodo_zip_filename") or f"{folder.name}.zip"
-        logger.info("Then I would zip everything and output to %s.", folder.parent / zip_filename)
+        logger.info(
+            "Then I would write an RO-Crate manifest, zip everything and output to %s.",
+            folder.parent / zip_filename,
+        )
         logger.info("BattINFO metadata would reference files via that zip's download URL.")
     else:
-        logger.info("Files would be left unzipped (pass --zip to bundle them into one zip).")
-        logger.info("BattINFO metadata would reference each file's own download URL.")
+        logger.info(
+            "Files would be left unzipped (pass --zip to package them with an RO-Crate "
+            "manifest for Zenodo)."
+        )
 
 
 def pub_info_from_root(folder: Path) -> tuple[dict, Path | None]:
