@@ -5,35 +5,81 @@ This Python package contains functions and a CLI for analysing data from the flo
 
 ## Installation
 
-Use Python >3.10, and install with pip:
+Use Python >=3.10, and install with pip:
 ```
-pip install git+https://github.com/empaeconversion/pyflowbatt.git
+pip install pyflowbatt
 ```
 
 ## Usage
 
 Use in a terminal (e.g. Command Prompt or PowerShell).
 
-To analyse data and get a full summary and ro-crate, use `pyflowbatt --folder="path/to/your/folder"`.
-
-To zip everything at the end (e.g. to upload to Zenodo), use `pyflowbatt --folder="path/to/your/folder" --zip`.
-
-You can also navigate to a folder e.g.
+To analyse the data in a folder, use
+```
+pyflowbatt --folder "path/to/your/folder"
+```
+Or go to a folder and just run `pyflowbatt`:
 ```
 cd path/to/your/folder
 pyflowbatt
 ```
-PyFlowBatt will automatically scan for files like GCPL, EIS, LSV, CV, as well as BattInfo Converter .xlsx files, process the data, convert to battery data format, produce summary graphs and excel reports, create a BattInfo JSON-LD metadata file, and a top level ro-crate metadata file.
 
-A full analysis can take a while. You can do a 'dry run' to check what files *would* be analysed:
+PyFlowBatt processes the data, converts it to battery data format, makes summary graphs and Excel reports, and creates a BattINFO JSON-LD metadata file.
+
+### How to lay out data
+
+Make one folder per sample (a "sample folder") and put raw data in it (not in subfolders). PyFlowBatt recognises each measurement from its file name, so the names need to contain `_OCV_`, `_PEIS_`, `_LSV_`, `_GCPL_`, `_CVpre` or `_CVpost`. If your files are named differently, you can change this in a `pyflowbatt.toml` file (see below).
+
+You can run PyFlowBatt on one sample folder, or on a folder with many sample folders inside it:
+
+```
+my-experiment/               <- run pyflowbatt here
+├── 261028_abcd_cell1/        <- a sample folder
+│   ├── ..._01_OCV_CE4.mpr
+│   ├── ..._02_PEIS_CE4.mpr
+│   ├── ..._04_GCPL_CE4.mpr
+│   ├── battinfo.xlsx        <- optional, from BattINFO Converter
+│   └── results/             <- made by PyFlowBatt
+├── 261028_abcd_cell2/       <- another sample folder
+│   └── ...
+└── combined_summary.xlsx    <- made by PyFlowBatt
+```
+
+Name each sample folder starting with the date and your initials, e.g. `250115_abcd_...`. PyFlowBatt uses the folder name as the sample name in the summaries.
+
+Sample folders can be grouped into subfolders, but don't put a sample folder inside another sample folder.
+
+### Zipping for Zenodo
+
+If you use `--zip`, PyFlowBatt also makes a zip of everything, with a RO-Crate metadata file describing the files inside:
+```
+pyflowbatt --folder "path/to/your/folder" --zip
+```
+
+### Several folders at once
+
+You can analyse several folders in one go. Each folder is analysed as if run on its own (including the zip, if used).
+```
+pyflowbatt --folder "path/to/X" "path/to/Y" "path/to/Z"
+```
+You can also combine all those summaries from multiple folders into one Excel file: add `--combined-summary` with an `.xlsx` file, or a folder to write `combined_summary.xlsx` into (`.` for the current folder).
+```
+pyflowbatt --folder "path/to/X" "path/to/Y" "path/to/Z" --combined-summary "path/to/all_samples.xlsx"
+```
+Its "Summary" sheet lists every sample from all the folders, and its "By folder" sheet puts each folder's average and standard deviation side by side.
+
+### Checking before a long run
+
+A full analysis can take a while. You can do a 'dry run' to check what files *would* be analysed, e.g.:
 ```
 pyflowbatt --dry
 ```
-
 ```
-pyflowbatt --dry --folder="path/to/your/folder" --zip
+pyflowbatt --dry --folder "path/to/your/folder" --zip
 ```
 This is useful for checking everything is in order before running a long analysis.
+
+### Settings
 
 You can override some settings by adding a `pyflowbatt.toml` file to a sample folder, parent folder, or your home folder. Use `pyflowbatt init` to create a template file and see what can be modified.
 
