@@ -6,6 +6,7 @@ import logging
 import re
 import uuid
 import zipfile
+from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
 from typing import Literal
 from urllib.parse import unquote
@@ -1293,7 +1294,7 @@ def _merged_row_order(indexes: list[pd.Index]) -> list[str]:
 
 
 def merge_summaries(
-    summary_xlsxs: list[str | Path],
+    summary_xlsxs: Sequence[str | Path],
     sample_ids_by_sample_folder: dict[Path, str] | None = None,
 ) -> pd.DataFrame:
     """Merge all summary sheets into one mega summary."""
@@ -1326,6 +1327,73 @@ def merge_summaries(
     return df[cols]
 
 
+def merge_folder_summaries(
+    summaries_by_folder: dict[str, list[Path]],
+    sample_ids_by_sample_folder: dict[Path, str] | None = None,
+) -> pd.DataFrame:
+    """Each folder's Average and Std over its samples, side by side."""
+    merged = {
+        label: merge_summaries(paths, sample_ids_by_sample_folder).set_index("Quantity")
+        for label, paths in summaries_by_folder.items()
+    }
+    df = pd.DataFrame(
+        {f"{label} {stat}": m[stat] for label, m in merged.items() for stat in ("Average", "Std")}
+    )
+    order = _merged_row_order([m.index for m in merged.values()])
+    return df.reindex(order).rename_axis("Quantity").reset_index()
+
+
+def write_summary_xlsx(path: Path, sheets: dict[str, pd.DataFrame]) -> None:
+    """Write each table to its own autofitted sheet."""
+    with pd.ExcelWriter(path, engine="xlsxwriter") as writer:
+        for name, df in sheets.items():
+            df.to_excel(writer, index=False, sheet_name=name)
+            writer.sheets[name].autofit()
+
+
+def folder_labels(folders: list[Path]) -> dict[Path, str]:
+    """Label each folder by its name, with as many parent folders as needed to tell them apart."""
+    depth = dict.fromkeys(folders, 1)
+    while True:
+        labels = {f: Path(*f.parts[-depth[f] :]).as_posix() for f in folders}
+        clashes = [
+            f
+            for f in folders
+            if list(labels.values()).count(labels[f]) > 1 and depth[f] < len(f.parts)
+        ]
+        if not clashes:
+            return labels
+        for f in clashes:
+            depth[f] += 1
+
+
+def write_multi_folder_summary(
+    sample_ids_by_folder: dict[Path, dict[Path, str]], path: Path
+) -> bool:
+    """Write all samples' summaries, and each folder's averages, from several folders into path.
+
+    Returns False if no folder has any sample summaries.
+    """
+    sample_ids = {sf: sid for ids in sample_ids_by_folder.values() for sf, sid in ids.items()}
+    labels = folder_labels(list(sample_ids_by_folder))
+    summaries_by_folder = {
+        labels[folder]: summaries
+        for folder, ids in sample_ids_by_folder.items()
+        if (summaries := [s for sf in ids if (s := sf / "results" / "summary.xlsx").exists()])
+    }
+    if not summaries_by_folder:
+        return False
+    all_summaries = [s for summaries in summaries_by_folder.values() for s in summaries]
+    write_summary_xlsx(
+        path,
+        {
+            "Summary": merge_summaries(all_summaries, sample_ids),
+            "By folder": merge_folder_summaries(summaries_by_folder, sample_ids),
+        },
+    )
+    return True
+
+
 def analyse_all_samples(  # noqa: PLR0913
     folder: str | Path,
     *,
@@ -1334,8 +1402,8 @@ def analyse_all_samples(  # noqa: PLR0913
     max_folder_searches: int = DEFAULT_SEARCH,
     zip_output: bool = False,
     reporter: Reporter | None = None,
-) -> None:
-    """Take a folder and run all analysis.
+) -> dict[Path, str]:
+    """Take a folder and run all analysis, returns the sample ID of each sample folder.
 
     If ``zip_output`` is True, everything is zipped into a single zip file next to
     ``folder`` once analysis finishes, for uploading to Zenodo. The zip holds an RO-Crate
@@ -1356,7 +1424,7 @@ def analyse_all_samples(  # noqa: PLR0913
     )
     if len(sample_folders) == 0:
         logger.error("No sample folders found in %s", folder)
-        return
+        return {}
     configs_by_sample_folder: dict[Path, PyFlowBattConfig] = {
         sample_folder: PyFlowBattConfig.load(sample_folder) for sample_folder in sample_folders
     }
@@ -1401,12 +1469,7 @@ def analyse_all_samples(  # noqa: PLR0913
                     folder, max_search_depth, max_folder_searches, search_config
                 )
                 df = merge_summaries(summaries, sample_ids_by_sample_folder)
-                writer = pd.ExcelWriter(folder / "combined_summary.xlsx", engine="xlsxwriter")
-                df.to_excel(writer, index=False, sheet_name="Summary")
-                workbook = writer.book
-                worksheet = writer.sheets["Summary"]
-                worksheet.autofit()
-                workbook.close()
+                write_summary_xlsx(folder / "combined_summary.xlsx", {"Summary": df})
                 logger.debug("Combined all the results into one big summary")
 
         if zip_output:
@@ -1454,6 +1517,7 @@ def analyse_all_samples(  # noqa: PLR0913
                 crate_path.unlink(missing_ok=True)
 
     reporter.finish()
+    return sample_ids_by_sample_folder
 
 
 def dry_analyse_all_samples(
@@ -1504,7 +1568,7 @@ def dry_analyse_all_samples(
     logger.info("Results would be saved as battery data format in '%s' files.", save_format)
     if len(sample_folders) > 1:
         logger.info(
-            "Then I would combine all the summaries into one 'combined_results.xlsx' "
+            "Then I would combine all the summaries into one 'combined_summary.xlsx' "
             "at the root '%s'.",
             folder.name,
         )
